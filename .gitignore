@@ -9,4 +9,5 @@ venv/
 .venv/
 /csv_train
 /csv_downloads
+out-qwen2vl-lora
 /routes/__pycache__

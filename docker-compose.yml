@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  web:
+    build: .
+    container_name: flask_pgvector_shop_web
+    command: python app.py
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env.production   # <── dùng file này thay vì .env
+    networks:
+      - appnet
+networks:
+  appnet:
+    external: true

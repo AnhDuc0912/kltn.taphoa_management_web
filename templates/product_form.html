@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Sửa' if product else 'Thêm mới' }} sản phẩm{% endblock %}
+{% block content %}
+<h3>{{ 'Sửa' if product else 'Thêm mới' }} sản phẩm</h3>
+<form method="post" enctype="multipart/form-data" class="row g-3">
+  
+  <div class="col-md-6">
+    <label class="form-label">Tên</label>
+    <input name="name" class="form-control" required value="{{ product.name if product else '' }}">
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Giá</label>
+    <input name="price" type="number" step="0.01" class="form-control" value="{{ product.price if product else '' }}">
+  </div>
+
+  <div class="col-md-6">
+    <label class="form-label">Mô tả</label>
+    <textarea name="description" class="form-control" rows="3">{{ product.description if product else '' }}</textarea>
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Danh mục</label>
+    <input name="category" class="form-control" value="{{ product.category if product else '' }}">
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Thương hiệu</label>
+    <input name="brand" class="form-control" value="{{ product.brand if product else '' }}">
+  </div>
+
+  <div class="col-md-6">
+    <label class="form-label">Ảnh (upload)</label>
+    <input type="file" name="image_file" class="form-control">
+  </div>
+  <div class="col-md-6">
+    <label class="form-label">Hoặc URL ảnh</label>
+    <input name="image_url" class="form-control" value="{{ product.image_url if product else '' }}">
+  </div>
+
+  {% if product %}
+  <div class="col-12 form-check mt-2">
+    <input type="checkbox" class="form-check-input" id="regen_embed" name="regen_embed">
+    <label class="form-check-label" for="regen_embed">Tạo lại embedding (ảnh + mô tả)</label>
+  </div>
+  {% else %}
+  <div class="col-12 form-check mt-2">
+    <input type="checkbox" class="form-check-input" id="gen_embed" name="gen_embed" checked>
+    <label class="form-check-label" for="gen_embed">Sinh embedding khi tạo</label>
+  </div>
+  {% endif %}
+
+  <div class="col-12">
+    <button class="btn btn-primary">Lưu</button>
+    <a class="btn btn-secondary" href="{{ url_for('list_products') }}">Hủy</a>
+  </div>
+</form>
+{% endblock %}

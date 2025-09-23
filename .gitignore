@@ -1,0 +1,12 @@
+uploads
+uploads/*
+/uploads/
+/__pycache__/
+.env.production
+.env
+/logs
+venv/
+.venv/
+/csv_train
+/csv_downloads
+/routes/__pycache__

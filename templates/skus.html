@@ -1,0 +1,141 @@
+{% extends "_base.html" %}
+{% block body %}
+<div class="d-flex align-items-center mb-3">
+  <h4 class="me-auto">SKUs</h4>
+  <div class="d-flex gap-2">
+    <!-- Did you mean 'captions_bp.captions_autogen' instead?
+
+Traceback (most recent call last) -->
+    <form method="post" action="{{ url_for('captions_bp.captions_autogen') }}"
+          onsubmit="return confirm('Tạo caption + mô tả cho tất cả ảnh CHƯA có caption?')">
+      <input type="hidden" name="limit" value="200">
+      <button class="btn btn-success">⚡ Tạo caption hàng loạt (Moondream)</button>
+    </form>
+    <form method="post" action=""
+          onsubmit="return confirm('Refresh search corpus?');">
+      <button class="btn btn-light">↻ Làm mới tìm kiếm</button>
+    </form>
+    <a class="btn btn-primary" href="{{ url_for('skus_bp.sku_new') }}">+ Thêm SKU</a>
+  </div>
+</div>
+
+
+<form class="row g-2 mb-3">
+  <div class="col-auto">
+    <select class="form-select" name="brand_id">
+      <option value="">-- Brand --</option>
+      {% for id,name in brands %}
+        <option value="{{ id }}" {{ 'selected' if sel_brand and sel_brand|int==id else '' }}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <select class="form-select" name="category_id">
+      <option value="">-- Category --</option>
+      {% for id,name in cats %}
+        <option value="{{ id }}" {{ 'selected' if sel_cat and sel_cat|int==id else '' }}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <input class="form-control" name="q" value="{{ qtext or '' }}"
+           placeholder="Tìm tên/brand/caption/OCR (BM25 + normalized)">
+  </div>
+  <div class="col-auto">
+    <button class="btn btn-outline-secondary">Lọc</button>
+  </div>
+
+  <!-- Bộ lọc nâng cao (optional: facets) -->
+  <div class="col-12">
+    <a class="small text-decoration-none" data-bs-toggle="collapse" href="#advFilter">Bộ lọc nâng cao</a>
+    <div class="collapse mt-2" id="advFilter">
+      <div class="row g-2">
+        <div class="col-auto">
+          <input class="form-control" name="shape" value="{{ request.args.get('shape','') if request is defined else '' }}" placeholder="shape: triangle/round/...">
+        </div>
+        <div class="col-auto">
+          <input class="form-control" name="packaging" value="{{ request.args.get('packaging','') if request is defined else '' }}" placeholder="packaging: transparent_bag/...">
+        </div>
+        <div class="col-auto">
+          <input class="form-control" name="texture" value="{{ request.args.get('texture','') if request is defined else '' }}" placeholder="texture: crispy/...">
+        </div>
+        <div class="col-auto">
+          <input class="form-control" name="color" value="{{ request.args.get('color','') if request is defined else '' }}" placeholder="color: yellow/golden/...">
+        </div>
+      </div>
+    </div>
+  </div>
+</form>
+
+<table class="table table-sm align-middle">
+  <thead>
+    <tr>
+      <th>Ảnh</th>
+      <th>Thông tin</th>
+      <th>Brand/Cat</th>
+      <th>Size</th>
+      <th>Active</th>
+      <th class="text-end">Thao tác</th>
+    </tr>
+  </thead>
+  <tbody>
+    {# rows: id,name,variant,size_tx,brand,cat,barcode,is_active,cover #}
+    {% set captions_map = captions_map|default({}) %}
+    {% set facets_map   = facets_map|default({}) %}
+    {% set colors_map   = colors_map|default({}) %}
+    {% for id, name, variant, size_tx, brand, cat, barcode, is_active, cover in rows %}
+      {% set cover_name = (cover|replace('\\','/')).split('/')[-1] if cover else '' %}
+      {% set cap = captions_map.get(id) %}
+      {% set facets = facets_map.get(id, []) %}
+      {% set colors = colors_map.get(id, []) %}
+      <tr>
+        <td style="width:72px">
+          {% if cover_name %}
+            <img src="{{ url_for('uploads.serve_upload', filename=cover_name) }}"
+                 style="height:56px;object-fit:cover;border-radius:8px">
+          {% endif %}
+        </td>
+        <td style="min-width: 320px">
+          <b class="d-block">{{ name }}</b>
+          {% if variant %}<div class="text-muted small">{{ variant }}</div>{% endif %}
+          {% if barcode %}<div class="text-muted small">Barcode: {{ barcode }}</div>{% endif %}
+          {% if cap %}
+            <div class="small mt-1" title="{{ cap }}">
+              <span class="badge bg-light text-dark me-1">caption</span>
+              {{ cap|truncate(80, True, '…') }}
+            </div>
+          {% endif %}
+          {% if facets %}
+            <div class="small mt-1">
+              {% for f in facets %}
+                <span class="badge bg-secondary-subtle border text-dark">{{ f }}</span>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% if colors %}
+            <div class="small mt-1">
+              {% for c in colors %}
+                <span class="badge" style="background:#eee;color:#333">{{ c }}</span>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </td>
+        <td>
+          {{ brand or '' }}
+          <div class="text-muted small">{{ cat or '' }}</div>
+        </td>
+        <td>{{ size_tx or '' }}</td>
+        <td>{{ '✅' if is_active else '❌' }}</td>
+        <td class="text-end d-flex gap-1 justify-content-end">
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('skus_bp.sku_edit', sku_id=id) }}" title="Sửa SKU">Sửa</a>
+          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('sku_images_bp.sku_images', sku_id=id) }}" title="Quản lý ảnh">Ảnh</a>
+          <a class="btn btn-sm btn-outline-dark" href="{{ url_for('sku_texts_bp.sku_texts_add', sku_id=id) }}" title="Mô tả chuẩn hoá">Mô tả</a>
+          <form class="d-inline" method="post" action="{{ url_for('skus_bp.sku_delete', sku_id=id) }}" onsubmit="return confirm('Xoá SKU?')">
+            <button class="btn btn-sm btn-outline-danger">Xoá</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

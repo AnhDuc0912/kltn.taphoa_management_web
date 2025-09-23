@@ -1,0 +1,26 @@
+{% extends "_base.html" %}
+{% block body %}
+<h4>Categories</h4>
+<form class="row g-2 mb-3" method="post" action="{{ url_for('category_create') }}">
+  <div class="col-auto"><input name="name" class="form-control" placeholder="Tên category"></div>
+  <div class="col-auto">
+    <input name="parent_id" class="form-control" placeholder="Parent ID (tuỳ chọn)">
+  </div>
+  <div class="col-auto"><button class="btn btn-primary">Thêm</button></div>
+</form>
+<table class="table table-sm table-striped">
+  <thead><tr><th>ID</th><th>Name</th><th>Parent</th><th></th></tr></thead>
+  <tbody>
+  {% for id,name,parent_id in rows %}
+    <tr>
+      <td>{{id}}</td><td>{{name}}</td><td>{{parent_id or ""}}</td>
+      <td class="text-end">
+        <form method="post" action="{{ url_for('category_delete', cid=id) }}" onsubmit="return confirm('Xoá category?')">
+          <button class="btn btn-sm btn-outline-danger">Xoá</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,13 @@
+flask==3.0.3
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+Pillow==10.4.0
+# choose one of the following depending on your environment:
+# CPU-only Torch (Linux): you can also pin a specific version as needed
+torch==2.3.1
+torchvision==0.18.1
+# OpenCLIP (preferred)
+open_clip_torch==2.24.0
+numpy==1.26.4
+# OpenAI CLIP fallback
+git+https://github.com/openai/CLIP.git

@@ -1,0 +1,68 @@
+﻿# routes/admin.py
+import os, csv, datetime
+from flask import Blueprint, send_file, request
+from services.db_utils import q, exec_sql
+from services.clip_service import embed_text_clip_512
+from utils import vn_norm
+
+bp = Blueprint("admin_bp", __name__)
+
+@bp.post("/admin/search-corpus/refresh", endpoint="refresh_corpus")
+def refresh_corpus():
+    exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
+    return {"ok": True}
+
+@bp.get("/admin/text-vec/backfill", endpoint="text_vec_backfill")
+def text_vec_backfill():
+    limit  = int(request.args.get("limit", 500))
+    offset = int(request.args.get("offset", 0))
+    rows = q("SELECT id, text FROM sku_texts WHERE text_vec IS NULL ORDER BY id ASC LIMIT %s OFFSET %s", (limit, offset))
+    ok = err = 0
+    for tid, text in rows:
+        try:
+            vec = embed_text_clip_512(text)
+            exec_sql("UPDATE sku_texts SET text_vec=%s WHERE id=%s", (vec, tid))
+            ok += 1
+        except Exception as e:
+            print("[text-vec] error", tid, e); err += 1
+    return {"ok": ok, "err": err}
+
+@bp.get("/skus/images/export.csv", endpoint="export_sku_images_csv")
+def export_sku_images_csv():
+    rows = q("""
+        SELECT s.id, s.name, s.variant, s.size_text, COALESCE(b.name,''), COALESCE(c.name,''),
+               (SELECT image_path FROM sku_images WHERE sku_id=s.id AND is_primary IS TRUE LIMIT 1) AS cover
+        FROM skus s LEFT JOIN brands b ON b.id=s.brand_id LEFT JOIN categories c ON c.id=s.category_id
+        WHERE NOT EXISTS (SELECT 1 FROM sku_captions sc WHERE sc.sku_id=s.id AND sc.lang='vi' AND sc.style='search' AND TRIM(sc.caption_text)<>'')
+        ORDER BY s.id""")
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "csv_downloads"); os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(out_dir, f"skus_no_captions_{ts}.csv")
+    app_host = os.getenv("APP_HOST","").strip().rstrip("/")
+    upload_folder = os.getenv("UPLOAD_FOLDER","uploads").strip().strip("/")
+    prefix = f"{app_host}/{upload_folder}/" if app_host else f"/{upload_folder}/"
+    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f); w.writerow(["sku_id","sku_name","variant","size_text","brand","category","cover_url"])
+        for sku_id, sku_name, variant, size_text, brand_name, category_name, cover in rows:
+            w.writerow([sku_id, sku_name, variant or "", size_text or "", brand_name, category_name, (prefix+cover) if cover else ""])
+    return send_file(out_path, mimetype="text/csv", as_attachment=True)
+
+@bp.get("/skus/captions/export.csv", endpoint="export_captions_csv")
+def export_captions_csv():
+    rows = q("""
+        SELECT si.image_path, sc.caption_text, s.id, s.name, s.variant, s.size_text, COALESCE(b.name,''), COALESCE(c.name,'')
+        FROM sku_captions sc
+        JOIN skus s ON s.id=sc.sku_id
+        JOIN sku_images si ON si.sku_id = s.id AND si.image_path = sc.image_path
+        LEFT JOIN brands b ON b.id=s.brand_id
+        LEFT JOIN categories c ON c.id=s.category_id
+        WHERE sc.lang='vi' AND sc.style='search'
+        ORDER BY s.id""")
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "csv_train"); os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(out_dir, f"sku_captions_{ts}.csv")
+    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f); w.writerow(["image_path","caption_text","sku_id","sku_name","variant","size_text","brand_name","category_name"])
+        for r in rows: w.writerow(r)
+    return send_file(out_path, mimetype="text/csv", as_attachment=True)
+

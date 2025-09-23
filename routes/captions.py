@@ -1,0 +1,80 @@
+﻿# routes/captions.py
+import os, time
+from flask import Blueprint, request, redirect, url_for, flash, current_app
+from services.db_utils import q, exec_sql
+from services.moondream_service import md_chat_vision, _mime_from_path
+
+bp = Blueprint("captions_bp", __name__)
+
+PROMPT_SEARCH = ("Viáº¿t 1â€“2 cÃ¢u caption bÃ¡n hÃ ng, khÃ¡ch quan, tiáº¿ng Viá»‡t. "
+                 "Náº¿u Ä‘á»c Ä‘Æ°á»£c tÃªn thÆ°Æ¡ng hiá»‡u/loáº¡i trÃªn bao bÃ¬ thÃ¬ ghi CHÃNH XÃC. KhÃ´ng emoji.")
+PROMPT_SEO = ("Viáº¿t mÃ´ táº£ 3â€“5 cÃ¢u báº±ng tiáº¿ng Viá»‡t cho trang sáº£n pháº©m. "
+              "Nháº¥n máº¡nh cÃ´ng dá»¥ng/Ä‘áº·c Ä‘iá»ƒm ná»•i báº­t; giá»¯ CHÃNH XÃC thÆ°Æ¡ng hiá»‡u/biáº¿n thá»ƒ/kÃ­ch cá»¡.")
+
+@bp.post("/admin/captions/autogen", endpoint="captions_autogen")
+def captions_autogen():
+    limit  = int(request.form.get("limit", request.args.get("limit", 200)))
+    offset = int(request.form.get("offset", request.args.get("offset", 0)))
+
+    rows = q("""
+        SELECT si.id, si.sku_id, si.image_path, si.ocr_text
+        FROM sku_images si
+        LEFT JOIN sku_captions sc
+               ON sc.sku_id = si.sku_id AND sc.image_path = si.image_path
+               AND sc.lang = 'vi' AND sc.style = 'search'
+        WHERE sc.id IS NULL
+        ORDER BY si.sku_id, si.is_primary DESC, si.id
+        LIMIT %s OFFSET %s
+    """, (limit, offset))
+
+    done = fail = 0
+    for (img_id, sku_id, img_path, ocr_text) in rows:
+        try:
+            fpath = img_path if os.path.isabs(img_path) else os.path.join(current_app.config["UPLOAD_DIR"], img_path)
+            with open(fpath, "rb") as f: img_bytes = f.read()
+            mime = _mime_from_path(fpath)
+            cap  = md_chat_vision(img_bytes, mime, PROMPT_SEARCH + (f"\nOCR: {ocr_text}" if ocr_text else ""))
+            desc = md_chat_vision(img_bytes, mime, PROMPT_SEO    + (f"\nOCR: {ocr_text}" if ocr_text else ""))
+
+            exec_sql("""INSERT INTO sku_captions(sku_id,image_path,lang,style,caption_text,model_name,prompt_version,needs_review)
+                        VALUES (%s,%s,'vi','search',%s,%s,'v1.0',TRUE)
+                        ON CONFLICT (sku_id,image_path,lang,style,model_name,prompt_version)
+                        DO UPDATE SET caption_text=EXCLUDED.caption_text, needs_review=TRUE""",
+                     (sku_id, img_path, cap, os.getenv("MOONDREAM_MODEL","moondream-2B")))
+            exec_sql("""INSERT INTO sku_captions(sku_id,image_path,lang,style,caption_text,model_name,prompt_version,needs_review)
+                        VALUES (%s,%s,'vi','seo',%s,%s,'v1.0',TRUE)
+                        ON CONFLICT (sku_id,image_path,lang,style,model_name,prompt_version)
+                        DO UPDATE SET caption_text=EXCLUDED.caption_text, needs_review=TRUE""",
+                     (sku_id, img_path, desc, os.getenv("MOONDREAM_MODEL","moondream-2B")))
+            done += 1
+        except Exception as e:
+            print("[autogen] error:", e); fail += 1
+
+    try: exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
+    except: pass
+
+    flash(f"Autogen xong: thÃ nh cÃ´ng {done}, lá»—i {fail}", "success" if fail==0 else "warning")
+    return redirect(url_for("skus"))
+
+@bp.post("/captions/suggest", endpoint="captions_suggest")
+def captions_suggest():
+    d = request.get_json(force=True)
+    exec_sql("""INSERT INTO sku_captions(sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
+                VALUES (%s,%s,'vi',%s,%s,%s,%s,TRUE)
+                ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version)
+                DO UPDATE SET caption_text=EXCLUDED.caption_text, needs_review=TRUE""",
+             (d["sku_id"], d["image_path"], d["style"], d["caption_text"],
+              d["model_name"], d.get("prompt_version","v1.0")))
+    return {"ok": True}
+
+@bp.post("/captions/<int:caption_id>/label", endpoint="captions_label")
+def captions_label(caption_id):
+    d = request.get_json(force=True)
+    exec_sql("""INSERT INTO caption_labels(caption_id, is_acceptable, corrected_text, notes)
+                VALUES (%s,%s,%s,%s)""",
+             (caption_id, bool(d.get("is_acceptable", True)),
+              (d.get("corrected_text") or "").strip() or None, d.get("notes")))
+    try: exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
+    except: pass
+    return {"ok": True}
+

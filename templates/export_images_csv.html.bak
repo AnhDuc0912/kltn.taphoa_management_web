@@ -1,0 +1,5 @@
+{% extends "_base.html" %}
+{% block body %}
+<h4>Export Images CSV</h4>
+
+{% endblock %}

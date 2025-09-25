@@ -11,3 +11,4 @@ venv/
 /csv_downloads
 out-qwen2vl-lora
 /routes/__pycache__
+tmp_qwen_debug

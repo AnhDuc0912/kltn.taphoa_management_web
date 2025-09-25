@@ -6,10 +6,10 @@
     <!-- Did you mean 'captions_bp.captions_autogen' instead?
 
 Traceback (most recent call last) -->
-    <form method="post" action="{{ url_for('captions_bp.captions_autogen') }}"
+    <form method="post" action="{{ url_for('captions_autogen_qwen') }}"
           onsubmit="return confirm('Tạo caption + mô tả cho tất cả ảnh CHƯA có caption?')">
       <input type="hidden" name="limit" value="200">
-      <button class="btn btn-success">⚡ Tạo caption hàng loạt (Moondream)</button>
+      <button class="btn btn-success">⚡ Tạo caption hàng loạt (Qwen)</button>
     </form>
     <form method="post" action=""
           onsubmit="return confirm('Refresh search corpus?');">

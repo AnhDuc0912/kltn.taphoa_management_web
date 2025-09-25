@@ -26,15 +26,18 @@ def skus():
     if qtext:
         sql += " AND EXISTS (SELECT 1 FROM sku_texts st WHERE st.sku_id=s.id AND st.text ILIKE %s)"
         params.append(f"%{vn_norm(qtext)}%")
-
-    sql += """
-    AND EXISTS (
-        SELECT 1 FROM sku_search_corpus c
-        WHERE c.sku_id=s.id AND
-              (c.tsv @@ plainto_tsquery('simple', %s) OR c.normalized_text ILIKE %s)
-    )
-    """
-    params.extend([vn_norm(qtext), f"%{vn_norm(qtext)}%"])
+        # Search in sku_search_corpus using correct column names
+        sql += """
+        AND EXISTS (
+            SELECT 1 FROM sku_search_corpus c
+            WHERE c.sku_id=s.id AND
+                  (c.search_vector @@ plainto_tsquery('simple', %s) OR c.text_content ILIKE %s)
+        )
+        """
+        params.extend([vn_norm(qtext), f"%{vn_norm(qtext)}%"])
+    else:
+        # No search query - don't filter by search corpus
+        pass
 
     rows   = q(sql, params)
     brands = q("SELECT id, name FROM brands ORDER BY name")

@@ -33,6 +33,35 @@
   <pre id="raw"></pre>
 </div>
 
+<style>
+.thumb {
+    max-width: 80px;
+    max-height: 80px;
+    object-fit: cover;
+}
+.grid {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+.badge {
+    background: #007bff;
+    color: white;
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+}
+.card {
+    margin-bottom: 1rem;
+    padding: 1rem;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+}
+</style>
+
 <script>
   async function doTextSearch() {
     const q = document.getElementById('q').value.trim();

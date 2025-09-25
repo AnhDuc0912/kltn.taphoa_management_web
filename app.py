@@ -23,6 +23,7 @@ from routes.sku_images import bp as sku_images_bp
 from routes.import_csv import bp as import_bp
 from routes.captions import bp as captions_bp
 from routes.admin import bp as admin_bp
+from routes import search_test
 
 app.register_blueprint(search_bp)      # blueprint hiá»‡n cÃ³
 app.register_blueprint(dashboard_bp)
@@ -35,6 +36,7 @@ app.register_blueprint(sku_images_bp)
 app.register_blueprint(import_bp)
 app.register_blueprint(captions_bp)
 app.register_blueprint(admin_bp)
+app.register_blueprint(search_test.bp)
 
 # factory compat (náº¿u cáº§n)
 def create_app():

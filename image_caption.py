@@ -11,10 +11,11 @@ from db import get_conn
 # ====== Cáº¥u hÃ¬nh ======
 MODEL_NAME = "gemini-1.5-flash"
 PROMPT_VI = (
-    "HÃ£y mÃ´ táº£ ngáº¯n gá»n ná»™i dung hÃ¬nh áº£nh dÃ¹ng lÃ m caption sáº£n pháº©m. "
-    "Tá»‘i Ä‘a 1â€“2 cÃ¢u, khÃ¡ch quan, trÃ¡nh quáº£ng cÃ¡o quÃ¡ Ä‘Ã . "
-    "Tráº£ lá»i báº±ng tiáº¿ng Viá»‡t."
+    "Hãy mô tả ngắn gọn nội dung hình ảnh dùng làm caption sản phẩm. "
+    "Tối đa 1–2 câu, khách quan, tránh quảng cáo quá đà. "
+    "Trả lời bằng tiếng Việt."
 )
+
 REQUEST_TIMEOUT = 60
 RETRY = 3
 DELAY_BETWEEN_CALLS = 0.5  # giÃ¢y

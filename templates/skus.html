@@ -3,22 +3,35 @@
 <div class="d-flex align-items-center mb-3">
   <h4 class="me-auto">SKUs</h4>
   <div class="d-flex gap-2">
-    <!-- Did you mean 'captions_bp.captions_autogen' instead?
-
-Traceback (most recent call last) -->
-    <form method="post" action="{{ url_for('captions_autogen_qwen') }}"
+    <!-- Fixed route name with blueprint -->
+    <form method="post" action="{{ url_for('captions_bp.captions_autogen_qwen') }}"
           onsubmit="return confirm('Tạo caption + mô tả cho tất cả ảnh CHƯA có caption?')">
       <input type="hidden" name="limit" value="200">
       <button class="btn btn-success">⚡ Tạo caption hàng loạt (Qwen)</button>
     </form>
-    <form method="post" action=""
+    
+    <!-- Backfill text vectors button -->
+    <form method="post" action="{{ url_for('admin_bp.text_vec_backfill') }}"
+          onsubmit="return confirm('Tạo vector embeddings cho texts chưa có vector?')">
+      <input type="hidden" name="limit" value="100">
+      <button class="btn btn-warning">📊 Backfill Text Vectors</button>
+    </form>
+    
+    <!-- Refresh search corpus button -->
+    <form method="post" action="{{ url_for('admin_bp.refresh_search_corpus') }}"
           onsubmit="return confirm('Refresh search corpus?');">
       <button class="btn btn-light">↻ Làm mới tìm kiếm</button>
     </form>
+    
+    <!-- Admin stats button -->
+    <button class="btn btn-secondary" onclick="loadAdminStats()">📈 Thống kê</button>
+    
     <a class="btn btn-primary" href="{{ url_for('skus_bp.sku_new') }}">+ Thêm SKU</a>
   </div>
 </div>
 
+<!-- Stats display area -->
+<div id="admin-stats" class="alert alert-info" style="display: none;"></div>
 
 <form class="row g-2 mb-3">
   <div class="col-auto">
@@ -139,3 +152,39 @@ Traceback (most recent call last) -->
   </tbody>
 </table>
 {% endblock %}
+
+<script>
+async function loadAdminStats() {
+    try {
+        const statsDiv = document.getElementById('admin-stats');
+        statsDiv.innerHTML = '⏳ Đang tải thống kê...';
+        statsDiv.style.display = 'block';
+        
+        const response = await fetch('/api/admin/stats');
+        const stats = await response.json();
+        
+        if (response.ok) {
+            statsDiv.innerHTML = `
+                <strong>📊 Thống kê hệ thống:</strong><br>
+                • Tổng SKUs: <span class="badge bg-primary">${stats.total_skus}</span> (Đang hoạt động: <span class="badge bg-success">${stats.active_skus}</span>)<br>
+                • Texts cần vector: <span class="badge bg-warning">${stats.texts_no_vector}</span><br>
+                • Images cần vector: <span class="badge bg-warning">${stats.images_no_vector}</span><br>
+                • Search corpus: ${stats.corpus_exists ? 
+                    `<span class="badge bg-info">${stats.corpus_entries} entries</span>` : 
+                    '<span class="badge bg-danger">Chưa tạo</span>'
+                }
+                <button type="button" class="btn-close float-end" onclick="document.getElementById('admin-stats').style.display='none'"></button>
+            `;
+            statsDiv.className = 'alert alert-info';
+        } else {
+            statsDiv.innerHTML = `❌ Lỗi: ${stats.error}`;
+            statsDiv.className = 'alert alert-danger';
+        }
+    } catch (e) {
+        const statsDiv = document.getElementById('admin-stats');
+        statsDiv.innerHTML = `❌ Không thể tải thống kê: ${e.message}`;
+        statsDiv.className = 'alert alert-danger';
+        statsDiv.style.display = 'block';
+    }
+}
+</script>

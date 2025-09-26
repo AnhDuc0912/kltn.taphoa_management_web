@@ -4,150 +4,185 @@ import io
 import time
 from PIL import Image
 import torch
-from transformers import AutoProcessor, AutoTokenizer, Qwen2VLForConditionalGeneration
-from peft import PeftModel
+from transformers import AutoProcessor, AutoTokenizer, Qwen2VLForConditionalGeneration, GenerationConfig
+from typing import List
 from sentence_transformers import SentenceTransformer
-from typing import List, Tuple
-import logging
-import traceback
+from peft import PeftModel
+import logging, traceback
 from logging.handlers import RotatingFileHandler
 
-# Khởi tạo logger
+# ================= Logging =================
 logger = logging.getLogger("qwen2vl_autogen")
-
-# Thiết lập logging
 if not logger.handlers:
     logs_dir = os.path.join(os.getcwd(), "logs")
     os.makedirs(logs_dir, exist_ok=True)
-    fh = RotatingFileHandler(os.path.join(logs_dir, "qwen2vl_autogen.log"), maxBytes=5*1024*1024, backupCount=5, encoding="utf-8")
+    fh = RotatingFileHandler(os.path.join(logs_dir, "qwen2vl_autogen.log"),
+                             maxBytes=5*1024*1024, backupCount=5, encoding="utf-8")
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    fh.setFormatter(fmt)
-    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt); fh.setLevel(logging.INFO)
+    ch = logging.StreamHandler(); ch.setFormatter(fmt); ch.setLevel(logging.WARNING)  # ít spam hơn
+    logger.addHandler(fh); logger.addHandler(ch)
+    logger.setLevel(logging.INFO); logger.propagate = False
 
-    ch = logging.StreamHandler()
-    ch.setFormatter(fmt)
-    ch.setLevel(logging.INFO)
-
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-# Cấu hình
-BASE_MODEL = os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-7B-Instruct")
+# ================= Config =================
+BASE_MODEL  = os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct")  # 2B mặc định
 ADAPTER_DIR = os.getenv("QWEN_VL_ADAPTER", r"e:\api_hango\flask_pgvector_shop\flask_pgvector_shop\out-qwen2vl-lora")
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
+USE_4BIT    = os.getenv("QWEN_LOAD_4BIT", "0") == "1"   # bật 4-bit nếu cần
+USE_LORA    = os.getenv("QWEN_USE_LORA", "0") == "1"    # gắn PEFT adapter nếu cần
+
+# Sentence-Transformers cho embedding
 EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Tải processor và mô hình
-print("Đang tải processor và mô hình gốc...", flush=True)
-processor = None
-processor_source_used = BASE_MODEL
-try:
-    processor = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
-    processor.tokenizer = tokenizer
-    logger.info("Đã tải processor và tokenizer từ mô hình gốc %s", BASE_MODEL)
-except Exception as e:
-    logger.exception("Không thể tải processor/tokenizer từ mô hình gốc %s: %s", BASE_MODEL, e)
-    raise
+# ================= Processor & Tokenizer =================
+print("Đang tải processor/tokenizer...", flush=True)
+processor = AutoProcessor.from_pretrained(
+    BASE_MODEL,
+    trust_remote_code=True,
+    use_fast=False
+)
+tokenizer  = AutoTokenizer.from_pretrained(
+    BASE_MODEL,
+    trust_remote_code=True,
+    use_fast=False
+)
+tokenizer.padding_side = "left"  # ổn định khi batch
+processor.tokenizer = tokenizer
+logger.info("Processor/tokenizer sẵn từ %s", BASE_MODEL)
 
-# Tải mô hình Qwen2-VL
-print("Đang tải mô hình gốc (có thể tải trọng số lớn)...", flush=True)
+# ================= Model Loading (2B) =================
+print("Đang tải mô hình 2B...", flush=True)
+
+# Tùy chọn 4-bit nếu có bitsandbytes
+quant_config = None
+if USE_4BIT:
+    try:
+        import bitsandbytes as bnb  # noqa: F401
+        from transformers import BitsAndBytesConfig
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=(torch.float16 if DEVICE == "cuda" else torch.float32),
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        logger.info("Bật 4-bit quantization (nf4).")
+    except Exception as e:
+        logger.warning("Không bật được 4-bit (thiếu bitsandbytes?). Fallback FP16/FP32. Lỗi: %s", e)
+        quant_config = None
+
+torch_dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+device_map  = "auto" if DEVICE == "cuda" else None
+
 base = Qwen2VLForConditionalGeneration.from_pretrained(
     BASE_MODEL,
-    device_map="auto" if DEVICE == "cuda" else None,
-    torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+    device_map=device_map,
+    torch_dtype=torch_dtype,
     trust_remote_code=True,
+    low_cpu_mem_usage=True,
+    attn_implementation="eager",    # tránh yêu cầu flash-attn
+    quantization_config=quant_config,
 )
 
-# Tạm bỏ LoRA để kiểm tra, uncomment nếu cần
-# print("Đang gắn adapter LoRA (PEFT)...", flush=True)
-# model = PeftModel.from_pretrained(base, ADAPTER_DIR, device_map="auto" if DEVICE == "cuda" else None)
-model = base
-model.eval()
+# Gắn LoRA nếu có (mặc định: tắt)
+if USE_LORA and os.path.isdir(ADAPTER_DIR):
+    print("Đang gắn adapter LoRA (PEFT)...", flush=True)
+    model = PeftModel.from_pretrained(base, ADAPTER_DIR, device_map=device_map)
+else:
+    model = base
 
+# một số cờ an toàn
+if getattr(model.config, "use_cache", None) is not None:
+    model.config.use_cache = False
+if model.config.pad_token_id is None:
+    model.config.pad_token_id = model.config.eos_token_id
+
+# ⚠️ Reset generation_config để loại các khóa không hỗ trợ (hết cảnh báo top_p/top_k)
+model.generation_config = GenerationConfig.from_model_config(model.config)
+
+model.eval()
+logger.info("Model đã sẵn sàng: %s", BASE_MODEL)
+
+# ================= Helpers =================
 def image_to_data_uri(pil_img: Image.Image, fmt="PNG") -> str:
     buf = io.BytesIO()
     pil_img.save(buf, format=fmt)
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/{fmt.lower()};base64,{b64}"
 
-def _build_inputs_with_processor(pil_img: Image.Image, text: str):
+def _build_inputs_with_processor(pil_img: Image.Image, chat_text: str):
     """
-    Gọi processor(text=..., images=...) một cách an toàn.
+    Với Qwen2-VL: apply_chat_template(..., tokenize=False) -> rồi processor(text=[...], images=[...]).
     """
-    global processor, processor_source_used
     try:
-        inputs = processor(text=[text], images=[pil_img], padding=True, return_tensors="pt")
-        logger.info("Token hóa input_ids: %s", processor.tokenizer.decode(inputs["input_ids"][0]))
-        logger.info("Shape đặc trưng hình ảnh: %s", inputs.get("pixel_values", "N/A").shape if "pixel_values" in inputs else "N/A")
-        return inputs
-    except TypeError as e:
-        logger.warning("Processor từ %s không chấp nhận hình ảnh: %s. Thử processor dự phòng", processor_source_used, e)
+        inputs = processor(text=[chat_text], images=[pil_img], return_tensors="pt")
+        # log ngắn để tránh spam
+        dec_preview = tokenizer.decode(inputs["input_ids"][0][:64], skip_special_tokens=False)
+        logger.info("input_ids preview: %s", dec_preview)
+        # pixel_values có thể là Tensor hoặc list[Tensor] tùy phiên bản
+        pv = inputs.get("pixel_values", None)
         try:
-            processor = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=True)
-            tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
-            processor.tokenizer = tokenizer
-            processor_source_used = BASE_MODEL
-            logger.info("Đã tải processor dự phòng từ %s", BASE_MODEL)
-            inputs = processor(text=[text], images=[pil_img], padding=True, return_tensors="pt")
-            logger.info("Token hóa input_ids: %s", processor.tokenizer.decode(inputs["input_ids"][0]))
-            return inputs
-        except Exception as e2:
-            logger.error("Processor dự phòng thất bại: %s", e2)
-            raise
+            shape_info = tuple(pv.shape) if isinstance(pv, torch.Tensor) else (len(pv),) if isinstance(pv, list) else None
+            logger.info("pixel_values.shape: %s", shape_info)
+        except Exception:
+            pass
+        return inputs
+    except Exception as e:
+        logger.error("Build inputs thất bại: %s", e)
+        raise
 
-def generate_caption_from_image(pil_img: Image.Image, prompt: str, max_new_tokens=128, temperature=0.2) -> str:
+def _to_device(batch, device):
+    """Đưa batch (Tensor/list/dict) lên đúng device một cách an toàn."""
+    if isinstance(batch, torch.Tensor):
+        return batch.to(device)
+    if isinstance(batch, list):
+        return [_to_device(x, device) for x in batch]
+    if isinstance(batch, dict):
+        return {k: _to_device(v, device) for k, v in batch.items()}
+    return batch
+
+def generate_caption_from_image(pil_img: Image.Image, prompt: str, max_new_tokens=96, temperature=0.0) -> str:
     try:
-        # Kiểm tra và chuẩn hóa hình ảnh
         if pil_img.mode != "RGB":
             pil_img = pil_img.convert("RGB")
-        pil_img = pil_img.resize((448, 448), Image.Resampling.LANCZOS)
-        logger.info("Đã resize hình ảnh về %s, mode=%s", pil_img.size, pil_img.mode)
 
-        # Format messages đúng cho Qwen2-VL
+        # messages đúng chuẩn Qwen2-VL
         messages = [
             {"role": "system", "content": "Bạn là một AI hữu ích, trả lời ngắn gọn bằng tiếng Việt."},
             {"role": "user", "content": [
                 {"type": "image"},
-                {"type": "text", "text": prompt + " Trả lời duy nhất caption ngắn (1-2 câu) bằng tiếng Việt."}
+                {"type": "text", "text": prompt + " Trả lời một caption ngắn 1-2 câu bằng tiếng Việt."}
             ]}
         ]
 
-        # Apply chat template
-        text = processor.apply_chat_template(messages, add_generation_prompt=True)
-        logger.info("Prompt đã chuẩn bị: %s", text)
+        # Lấy string prompt (không tokenize ở đây)
+        chat_text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        inputs = _build_inputs_with_processor(pil_img, chat_text)
 
-        # Tạo inputs
-        inputs = _build_inputs_with_processor(pil_img, text)
-
-        # Di chuyển tensor đến device
+        # đẩy tensors lên device của model (robust)
         device = next(model.parameters()).device
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        inputs = _to_device(inputs, device)
 
-        logger.info("Tóm tắt inputs trước khi tạo: %s", 
-                    {k: (v.shape if isinstance(v, torch.Tensor) else str(type(v))) for k, v in inputs.items()})
+        logger.info("Inputs summary: %s", {k: (tuple(v.shape) if isinstance(v, torch.Tensor) else type(v).__name__)
+                                            for k, v in inputs.items()})
 
-        # Generate
-        try:
-            with torch.no_grad():
-                out_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, temperature=temperature)
-        except Exception as ge:
-            msg = str(ge)
-            logger.error("Generate thất bại: %s\nTraceback:\n%s", ge, traceback.format_exc())
-            raise
+        gen_kwargs = dict(
+            max_new_tokens=max_new_tokens,
+            do_sample=(temperature > 0),
+            temperature=(temperature if temperature > 0 else None),
+            repetition_penalty=1.05,
+        )
 
-        # Giải mã đầu ra
-        generated_ids = out_ids[0][inputs["input_ids"].shape[1]:]
-        text = processor.decode(generated_ids, skip_special_tokens=True).strip()
+        with torch.inference_mode():
+            out_ids = model.generate(**inputs, **{k: v for k, v in gen_kwargs.items() if v is not None})
 
-        logger.info("Tạo caption thành công | len=%d", len(text or ""))
+        # cắt phần prompt, chỉ lấy phần sinh
+        in_len = inputs["input_ids"].shape[1]
+        gen_ids = out_ids[0, in_len:]
+        text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+        logger.info("Caption OK | len=%d", len(text))
         return text
     except Exception as e:
-        tb = traceback.format_exc()
-        logger.error("Lỗi trong generate_caption_from_image: %s\nPrompt: %r\nImage.size=%s\nTraceback:\n%s", 
-                     e, (prompt or "")[:200], getattr(pil_img, "size", None), tb)
+        logger.error("Lỗi generate_caption_from_image: %s\nTraceback:\n%s", e, traceback.format_exc())
         raise
 
 def split_segments(text: str) -> List[str]:
@@ -165,20 +200,38 @@ def process_images(paths: List[str], prompt_search: str = "Viết caption ngắn
             print(f"[{i}/{len(paths)}] Đang tải {p}", flush=True)
             pil = Image.open(p).convert("RGB")
             caption = generate_caption_from_image(pil, prompt_search)
-            print(f"Caption gốc: {caption}", flush=True)
-            segs = split_segments(caption)
-            for j, s in enumerate(segs, start=1):
-                print(f"  segment {j}/{len(segs)}: {s}", flush=True)
+            print(f"Caption: {caption}", flush=True)
+            for j, s in enumerate(split_segments(caption), start=1):
+                print(f"  segment {j}: {s}", flush=True)
                 vec = embed_text(s)
                 print(f"    embedding len={len(vec)}", flush=True)
-            time.sleep(0.5)
+            time.sleep(0.1)
         except Exception as ex:
             print("Lỗi:", ex, flush=True)
 
+def quick_test(img_path: str):
+    pil = Image.open(img_path).convert("RGB")
+    cap = generate_caption_from_image(
+        pil,
+        prompt="Mô tả sản phẩm ngắn gọn, khách quan, tiếng Việt.",
+        max_new_tokens=64,
+        temperature=0.0
+    )
+    print(">>> CAPTION:", cap)
+
+# ================= Main =================
 if __name__ == "__main__":
     import sys, glob
+
+    # Đầu tiên test 1 ảnh để xác nhận output
     if len(sys.argv) > 1:
         paths = sys.argv[1:]
     else:
-        paths = glob.glob(os.path.join(os.getcwd(), "Uploads", "*.png"))[:50]
-    process_images(paths)
+        paths = glob.glob(os.path.join(os.getcwd(), "uploads", "*.png"))[:1]
+
+    if not paths:
+        print("Không tìm thấy ảnh test trong ./uploads/*.png")
+    else:
+        quick_test(paths[0])
+        # Khi đã OK, bỏ comment dòng dưới để chạy hàng loạt:
+        # process_images(paths)

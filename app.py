@@ -1,7 +1,6 @@
 ﻿# app.py
 import os
 from flask import Flask
-from search_routes import bp as search_bp  # náº¿u báº¡n Ä‘ang dÃ¹ng
 from werkzeug.routing import BuildError
 
 # --- App & cáº¥u hÃ¬nh chung ---
@@ -23,9 +22,8 @@ from routes.sku_images import bp as sku_images_bp
 from routes.import_csv import bp as import_bp
 from routes.captions import bp as captions_bp
 from routes.admin import bp as admin_bp
-from routes import search_test
+from routes.search_test import bp as search_bp
 
-app.register_blueprint(search_bp)      # blueprint hiá»‡n cÃ³
 app.register_blueprint(dashboard_bp)
 app.register_blueprint(uploads_bp)
 app.register_blueprint(brands_bp)
@@ -35,10 +33,8 @@ app.register_blueprint(sku_texts_bp)
 app.register_blueprint(sku_images_bp)
 app.register_blueprint(import_bp)
 app.register_blueprint(captions_bp)
-# Đảm bảo chỉ import và register admin blueprint một lần
-from routes import admin
-app.register_blueprint(admin.bp)  # chỉ có 1 dòng này, không duplicate
-app.register_blueprint(search_test.bp)
+app.register_blueprint(admin_bp)
+app.register_blueprint(search_bp)
 
 # factory compat (náº¿u cáº§n)
 def create_app():

@@ -59,107 +59,183 @@ def captions_autogen():
 @bp.post("/admin/captions/autogen_qwen")
 def captions_autogen_qwen():
     """
-    Generate captions for images that don't have a 'vi'/'search' caption yet,
-    using the qwen2vl-lora adapter (tools/qwen2vl_autogen.py).
+    Autogen caption + LƯU NGỮ NGHĨA:
+    - Gọi Qwen2-VL sinh caption 'search' + 'seo'
+    - Trigger đã đẩy 'search' -> sku_texts.text
+    - Embed caption/segment -> UPDATE sku_texts.text_vec (512D)
+    - (optional) Embed ảnh -> UPDATE sku_images.image_vec
     """
-    limit = int(request.form.get("limit") or request.args.get("limit") or 100)
+    limit  = int(request.form.get("limit") or request.args.get("limit") or 100)
     offset = int(request.form.get("offset") or request.args.get("offset") or 0)
 
-    # lazy import heavy model functions to avoid loading at app import time
+    # lazy import để không tải nặng khi app start
     try:
-        from tools.qwen2vl_autogen import generate_caption_from_image, split_segments, embed_text
+        from tools.qwen2vl_autogen import generate_caption_from_image, split_segments, embed_text, embed_image
         from PIL import Image
     except Exception as e:
         current_app.logger.exception("Failed to import qwen2vl tool")
         flash("Không thể nạp module qwen autogen: " + str(e), "danger")
         return redirect(url_for("skus_bp.skus"))
 
+    def _vec_literal(vec):
+        # serialize -> '[0.123,0.456,...]' để cast ::vector
+        return "[" + ",".join(f"{float(x):.6f}" for x in vec) + "]"
+
+    def _l2norm(v):
+        import math
+        n = math.sqrt(sum(float(x)*float(x) for x in v)) or 1.0
+        return [float(x)/n for x in v]
+
+    def _vn_norm(s: str) -> str:
+        import unicodedata, re
+        s = (s or "").strip().lower()
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        s = re.sub(r"[^a-z0-9 \-\.x/]+", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _upsert_text_and_vec(sku_id: int, raw_text: str, vec: list, model_name="openclip_vit_b32"):
+        """
+        - Chuẩn hoá 'text' như trigger đang dùng
+        - Đảm bảo có dòng trong sku_texts
+        - Ghi vector vào text_vec (và text_vec_model nếu có)
+        """
+        norm = _vn_norm(raw_text)
+        if not norm:
+            return
+
+        # đảm bảo có hàng text trong sku_texts
+        exec_sql("""
+            INSERT INTO sku_texts(sku_id, text)
+            VALUES (%s, %s)
+            ON CONFLICT (sku_id, text) DO NOTHING
+        """, (sku_id, norm))
+
+        if vec:
+            vec = _l2norm(vec)
+            vec_lit = _vec_literal(vec)
+            # thử update cả model_name; nếu cột không tồn tại -> fallback chỉ text_vec
+            try:
+                exec_sql("""
+                    UPDATE sku_texts
+                       SET text_vec = %s::vector,
+                           text_vec_model = %s
+                     WHERE sku_id = %s AND text = %s
+                """, (vec_lit, model_name, sku_id, norm))
+            except Exception:
+                exec_sql("""
+                    UPDATE sku_texts
+                       SET text_vec = %s::vector
+                     WHERE sku_id = %s AND text = %s
+                """, (vec_lit, sku_id, norm))
+
+    def _update_image_vec(image_path: str, vec: list, model_name="openclip_vit_b32"):
+        if not vec:
+            return
+        vec = _l2norm(vec)
+        vec_lit = _vec_literal(vec)
+        try:
+            exec_sql("""
+                UPDATE sku_images
+                   SET image_vec = %s::vector, image_vec_model = %s
+                 WHERE image_path = %s
+            """, (vec_lit, model_name, image_path))
+        except Exception:
+            exec_sql("""
+                UPDATE sku_images
+                   SET image_vec = %s::vector
+                 WHERE image_path = %s
+            """, (vec_lit, image_path))
+
     rows = q("""
         SELECT si.id, si.sku_id, si.image_path, si.ocr_text
         FROM sku_images si
         LEFT JOIN sku_captions sc
-          ON sc.sku_id = si.sku_id
-         AND sc.image_path = si.image_path
-         AND sc.lang = 'vi'
-         AND sc.style = 'search'
+               ON sc.sku_id = si.sku_id
+              AND sc.image_path = si.image_path
+              AND sc.lang = 'vi'
+              AND sc.style = 'search'
         WHERE sc.id IS NULL
         ORDER BY si.sku_id, si.is_primary DESC, si.id
         LIMIT %s OFFSET %s
     """, (limit, offset))
 
-    done = 0
-    fail = 0
+    done, fail = 0, 0
     upload_dir = current_app.config.get("UPLOAD_DIR", "uploads")
 
     for img_id, sku_id, image_path, ocr_text in rows:
         try:
-            # build filesystem path
             fpath = image_path if os.path.isabs(image_path) else os.path.join(upload_dir, image_path)
             if not os.path.exists(fpath):
-                raise FileNotFoundError(fpath)
+                raise FileNotFoundError(f"Không tìm thấy ảnh: {fpath}")
 
             img = Image.open(fpath).convert("RGB")
 
+            # Prompt (đã tối ưu cho search/seo)
             prompt_search = PROMPT_SEARCH + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
-            prompt_seo = PROMPT_SEO + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
+            prompt_seo    = PROMPT_SEO    + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
 
-            # generate captions
-            cap = generate_caption_from_image(img, prompt_search)
-            desc = generate_caption_from_image(img, prompt_seo)
+            # 1) Gọi Qwen sinh caption
+            cap  = generate_caption_from_image(img, prompt_search)  # 1 câu, giàu từ khoá
+            desc = generate_caption_from_image(img, prompt_seo)     # 1–2 câu
 
-            # split & optionally embed segments
-            segs = split_segments(cap)
-            embeddings = []
-            for seg in segs:
-                try:
-                    vec = embed_text(seg)
-                    embeddings.append((seg, vec))
-                except Exception:
-                    # embedding failure shouldn't block caption save
-                    current_app.logger.debug("Embed fail for sku %s seg=%r", sku_id, seg)
+            # 2) Lưu sku_captions (trigger sẽ đẩy 'search' -> sku_texts.text)
+            exec_sql("""
+                INSERT INTO sku_captions
+                    (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
+                VALUES (%s,%s,'vi','search',%s,%s,'v1',TRUE)
+                ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
+                   SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
+            """, (sku_id, image_path, cap, "qwen2vl-lora"))
 
-            # upsert captions (search + seo)
+            exec_sql("""
+                INSERT INTO sku_captions
+                    (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
+                VALUES (%s,%s,'vi','seo',%s,%s,'v1',TRUE)
+                ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
+                   SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
+            """, (sku_id, image_path, desc, "qwen2vl-lora"))
+
+            # 3) EMBED & LƯU NGỮ NGHĨA (text_vec + image_vec)
+            # 3a) Embed caption 'search' (full câu)
             try:
-                exec_sql("""
-                    INSERT INTO sku_captions (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
-                    VALUES (%s,%s,'vi','search',%s,%s,'qwen2vl-lora-v1',TRUE)
-                    ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
-                      SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
-                """, (sku_id, image_path, cap, "qwen2vl-lora"))
-                exec_sql("""
-                    INSERT INTO sku_captions (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
-                    VALUES (%s,%s,'vi','seo',%s,%s,'qwen2vl-lora-v1',TRUE)
-                    ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
-                      SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
-                """, (sku_id, image_path, desc, "qwen2vl-lora"))
+                v_cap = embed_text(cap)          # -> list[512]
+                _upsert_text_and_vec(sku_id, cap, v_cap, model_name="openclip_vit_b32")
             except Exception:
-                current_app.logger.exception("Failed to upsert sku_captions")
+                current_app.logger.warning("Embed caption failed (sku=%s)", sku_id)
 
-            # store segment embeddings if table exists (text_vectors with column v as vector or json)
-            for seg_text, vec in embeddings:
-                try:
-                    # adjust table/column per your DB schema; here we try a generic text_vectors table
-                    exec_sql("""
-                        INSERT INTO text_vectors (sku_id, text, v, created_at)
-                        VALUES (%s, %s, %s, now())
-                    """, (sku_id, seg_text, vec))
-                except Exception:
-                    # ignore if table/column not present
-                    current_app.logger.debug("Skipping saving vector (table may not exist) for sku %s", sku_id)
+            # 3b) Embed từng "đoạn" (nếu bạn muốn thêm nhiều hàng text để phủ token)
+            try:
+                for seg in split_segments(cap):
+                    if seg and seg.strip():
+                        v_seg = embed_text(seg)
+                        _upsert_text_and_vec(sku_id, seg, v_seg, model_name="openclip_vit_b32")
+            except Exception:
+                pass  # không bắt buộc
+
+            # 3c) (Tuỳ chọn) Embed ảnh -> image_vec
+            try:
+                v_img = embed_image(img)        # -> list[512]
+                _update_image_vec(image_path, v_img, model_name="openclip_vit_b32")
+            except Exception:
+                # không chặn pipeline nếu embed ảnh lỗi
+                pass
 
             done += 1
-            time.sleep(0.2)  # small pause to avoid hot-loop
-        except Exception as e:
-            fail += 1
-            current_app.logger.exception("Autogen error for img_id=%s sku_id=%s", img_id, sku_id)
+            time.sleep(0.15)  # giảm tải
 
+        except Exception:
+            fail += 1
+            current_app.logger.exception("Autogen error img_id=%s sku_id=%s", img_id, sku_id)
+
+    # 4) Refresh corpus để BM25/fuzzy bắt kịp caption mới
     try:
-        # optional: refresh search corpus if function exists
         exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
     except Exception:
         pass
 
-    flash(f"Autogen QWEN: OK={done}, FAIL={fail}", "success" if fail==0 else "warning")
+    flash(f"Autogen QWEN (lưu ngữ nghĩa): OK={done}, FAIL={fail}", "success" if fail==0 else "warning")
     return redirect(url_for("skus_bp.skus"))
 
 @bp.post("/captions/suggest", endpoint="captions_suggest")

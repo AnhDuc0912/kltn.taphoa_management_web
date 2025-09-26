@@ -16,46 +16,42 @@ def sku_texts_page(sku_id):
 
 @bp.post("/skus/<int:sku_id>/texts", endpoint="sku_texts_add")
 def sku_texts_add(sku_id):
-    text = (request.form.get("text") or "").strip()
-    if not text:
-        flash("ChÆ°a nháº­p mÃ´ táº£.", "warning")
+    txt = (request.form.get("text") or "").strip()
+    if not txt:
+        flash("Chưa nhập mô tả", "danger")
         return redirect(url_for("sku_texts_bp.sku_texts_page", sku_id=sku_id))
-
-    # náº¿u cÃ³ hÃ m chuáº©n hoÃ¡ trong project, gá»i á»Ÿ Ä‘Ã¢y; fallback dÃ¹ng text tháº³ng
+    
     try:
-        normalize = globals().get("vn_norm") or (lambda s: s)
-        normed = normalize(text)
-
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO sku_texts (sku_id, text, normalized_text, created_at)
-                VALUES (%s, %s, %s, now())
-                ON CONFLICT (sku_id, text) DO NOTHING
-                """,
-                (sku_id, text, normed),
-            )
-            if cur.rowcount and cur.rowcount > 0:
-                flash("ÄÃ£ thÃªm mÃ´ táº£.", "success")
-            else:
-                flash("MÃ´ táº£ trÃ¹ng láº·p â€” Ä‘Ã£ bá» qua.", "info")
-            conn.commit()
+        from utils import vn_norm
+        norm = vn_norm(txt)
+        exec_sql("INSERT INTO sku_texts(sku_id, text) VALUES(%s, %s)", (sku_id, norm))
+        flash("Đã thêm mô tả", "success")
+        current_app.logger.info("Added sku_text for sku_id=%s", sku_id)
     except Exception as e:
-        current_app.logger.exception("Lá»—i khi thÃªm sku_texts")
-        flash("Lá»—i khi thÃªm mÃ´ táº£.", "danger")
-
+        flash(f"Lỗi: {e}", "danger")
+        current_app.logger.exception("Error adding sku_text for sku_id=%s", sku_id)
+    
     return redirect(url_for("sku_texts_bp.sku_texts_page", sku_id=sku_id))
 
 @bp.post("/skus/<int:sku_id>/texts/<int:text_id>/update", endpoint="sku_texts_update")
 def sku_texts_update(sku_id, text_id):
     txt = (request.form.get("text") or "").strip()
     if not txt:
-        flash("ChÆ°a nháº­p mÃ´ táº£","danger")
+        flash("Chưa nhập mô tả", "danger")
         return redirect(url_for("sku_texts_bp.sku_texts_page", sku_id=sku_id))
-    # normalize using available normalizer if present
-    norm = globals().get("vn_norm") or (lambda s: s)
-    exec_sql("UPDATE sku_texts SET text=%s, normalized_text=%s WHERE id=%s AND sku_id=%s", (txt, norm(txt), text_id, sku_id))
-    flash("ÄÃ£ lÆ°u mÃ´ táº£","success")
+    
+    try:
+        from utils import vn_norm
+        norm = vn_norm(txt)
+        # Update text và clear vector để force re-backfill
+        exec_sql("UPDATE sku_texts SET text=%s, text_vec=NULL WHERE id=%s AND sku_id=%s", 
+                (norm, text_id, sku_id))
+        flash("Đã lưu mô tả", "success")
+        current_app.logger.info("Updated sku_text id=%s", text_id)
+    except Exception as e:
+        flash(f"Lỗi: {e}", "danger")
+        current_app.logger.exception("Error updating sku_text id=%s", text_id)
+    
     return redirect(url_for("sku_texts_bp.sku_texts_page", sku_id=sku_id))
 
 @bp.post("/skus/<int:sku_id>/texts/<int:text_id>/delete", endpoint="sku_texts_delete")

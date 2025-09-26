@@ -35,7 +35,9 @@ app.register_blueprint(sku_texts_bp)
 app.register_blueprint(sku_images_bp)
 app.register_blueprint(import_bp)
 app.register_blueprint(captions_bp)
-app.register_blueprint(admin_bp)
+# Đảm bảo chỉ import và register admin blueprint một lần
+from routes import admin
+app.register_blueprint(admin.bp)  # chỉ có 1 dòng này, không duplicate
 app.register_blueprint(search_test.bp)
 
 # factory compat (náº¿u cáº§n)

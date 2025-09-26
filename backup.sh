@@ -10,6 +10,6 @@ sudo mkdir -p $BACKUP_DIR
 
 # 1. Backup uploads folder từ container ra host
 # (uploads phải nằm trong /app/uploads trong container)
-sudo docker cp $WEB_CONTAINER:/app/$UPLOAD_FOLDER $BACKUP_DIR/uploads
+sudo docker cp $WEB_CONTAINER:/app/uploads/ $BACKUP_DIR/
 
 echo "Backup xong! Kiểm tra thư mục $BACKUP_DIR để lấy file về local."

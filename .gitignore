@@ -13,3 +13,4 @@ out-qwen2vl-lora
 /routes/__pycache__
 tmp_qwen_debug
 out-qwen2vl-2B-lora
+backup

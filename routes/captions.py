@@ -61,21 +61,116 @@ def captions_autogen_qwen():
     """
     Autogen caption + LƯU NGỮ NGHĨA:
     - Gọi Qwen2-VL sinh caption 'search' + 'seo'
-    - Trigger đã đẩy 'search' -> sku_texts.text
+    - Trigger sẽ đẩy 'search' -> sku_texts.text
     - Embed caption/segment -> UPDATE sku_texts.text_vec (512D)
     - (optional) Embed ảnh -> UPDATE sku_images.image_vec
     """
     limit  = int(request.form.get("limit") or request.args.get("limit") or 100)
     offset = int(request.form.get("offset") or request.args.get("offset") or 0)
+    sku_id = request.form.get("sku_id") or request.args.get("sku_id")  # Thêm parameter cho 1 sản phẩm
 
     # lazy import để không tải nặng khi app start
     try:
-        from tools.qwen2vl_autogen import generate_caption_from_image, split_segments, embed_text, embed_image
+        from tools.qwen2vl_autogen import generate_caption
         from PIL import Image
     except Exception as e:
         current_app.logger.exception("Failed to import qwen2vl tool")
         flash("Không thể nạp module qwen autogen: " + str(e), "danger")
         return redirect(url_for("skus_bp.skus"))
+
+    # Temporary helper functions until modules are ready
+    def split_segments(text, max_len=100):
+        """Split text into segments of max_len characters"""
+        if not text or len(text) <= max_len:
+            return [text] if text else []
+        
+        words = text.split()
+        segments = []
+        current = ""
+        
+        for word in words:
+            if len(current + " " + word) <= max_len:
+                current = current + " " + word if current else word
+            else:
+                if current:
+                    segments.append(current)
+                current = word
+        
+        if current:
+            segments.append(current)
+        
+        return segments
+
+    def embed_text(text):
+        """Return embedding list for a text string. Uses utils.encode_texts if available,
+        otherwise returns a random 512-d vector as fallback."""
+        try:
+            from utils import encode_texts
+            emb = encode_texts([text])[0]
+            try:
+                return emb.tolist()
+            except Exception:
+                return list(emb)
+        except Exception as e:
+            # fallback random vector
+            try:
+                import numpy as np
+                current_app.logger.warning("embed_text fallback (utils.encode_texts failed): %s", e)
+                return np.random.rand(512).tolist()
+            except Exception:
+                return []
+
+    def embed_image(img):
+        """Return embedding list for a PIL.Image or image path. Uses utils.encode_images if available,
+        otherwise returns a random 512-d vector as fallback."""
+        try:
+            from utils import encode_images
+            from PIL import Image as PILImage
+            if isinstance(img, str):
+                img = PILImage.open(img).convert("RGB")
+            emb = encode_images([img])[0]
+            try:
+                return emb.tolist()
+            except Exception:
+                return list(emb)
+        except Exception as e:
+            # fallback random vector
+            try:
+                import numpy as np
+                current_app.logger.warning("embed_image fallback (utils.encode_images failed): %s", e)
+                return np.random.rand(512).tolist()
+            except Exception:
+                return []
+
+    # Build query based on whether we're processing one SKU or many
+    if sku_id:
+        # Process single SKU - get all images for this SKU that don't have captions
+        query = """
+            SELECT si.id, si.sku_id, si.image_path, si.ocr_text
+            FROM sku_images si
+            LEFT JOIN sku_captions sc
+                   ON sc.sku_id = si.sku_id
+                  AND sc.image_path = si.image_path
+                  AND sc.lang = 'vi'
+                  AND sc.style = 'search'
+            WHERE si.sku_id = %s AND sc.id IS NULL
+            ORDER BY si.is_primary DESC, si.id
+        """
+        rows = q(query, (int(sku_id),))
+    else:
+        # Process multiple SKUs (original behavior)
+        rows = q("""
+            SELECT si.id, si.sku_id, si.image_path, si.ocr_text
+            FROM sku_images si
+            LEFT JOIN sku_captions sc
+                   ON sc.sku_id = si.sku_id
+                  AND sc.image_path = si.image_path
+                  AND sc.lang = 'vi'
+                  AND sc.style = 'search'
+            WHERE sc.id IS NULL
+            ORDER BY si.sku_id, si.is_primary DESC, si.id
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
 
     def _vec_literal(vec):
         # serialize -> '[0.123,0.456,...]' để cast ::vector
@@ -148,23 +243,10 @@ def captions_autogen_qwen():
                  WHERE image_path = %s
             """, (vec_lit, image_path))
 
-    rows = q("""
-        SELECT si.id, si.sku_id, si.image_path, si.ocr_text
-        FROM sku_images si
-        LEFT JOIN sku_captions sc
-               ON sc.sku_id = si.sku_id
-              AND sc.image_path = si.image_path
-              AND sc.lang = 'vi'
-              AND sc.style = 'search'
-        WHERE sc.id IS NULL
-        ORDER BY si.sku_id, si.is_primary DESC, si.id
-        LIMIT %s OFFSET %s
-    """, (limit, offset))
-
     done, fail = 0, 0
     upload_dir = current_app.config.get("UPLOAD_DIR", "uploads")
 
-    for img_id, sku_id, image_path, ocr_text in rows:
+    for img_id, curr_sku_id, image_path, ocr_text in rows:
         try:
             fpath = image_path if os.path.isabs(image_path) else os.path.join(upload_dir, image_path)
             if not os.path.exists(fpath):
@@ -177,8 +259,8 @@ def captions_autogen_qwen():
             prompt_seo    = PROMPT_SEO    + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
 
             # 1) Gọi Qwen sinh caption
-            cap  = generate_caption_from_image(img, prompt_search)  # 1 câu, giàu từ khoá
-            desc = generate_caption_from_image(img, prompt_seo)     # 1–2 câu
+            cap  = generate_caption(img, prompt_search)  # 1 câu, giàu từ khoá
+            desc = generate_caption(img, prompt_seo)     # 1–2 câu
 
             # 2) Lưu sku_captions (trigger sẽ đẩy 'search' -> sku_texts.text)
             exec_sql("""
@@ -187,7 +269,7 @@ def captions_autogen_qwen():
                 VALUES (%s,%s,'vi','search',%s,%s,'v1',TRUE)
                 ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
                    SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
-            """, (sku_id, image_path, cap, "qwen2vl-lora"))
+            """, (curr_sku_id, image_path, cap, "qwen2vl-lora"))
 
             exec_sql("""
                 INSERT INTO sku_captions
@@ -195,22 +277,22 @@ def captions_autogen_qwen():
                 VALUES (%s,%s,'vi','seo',%s,%s,'v1',TRUE)
                 ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
                    SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
-            """, (sku_id, image_path, desc, "qwen2vl-lora"))
+            """, (curr_sku_id, image_path, desc, "qwen2vl-lora"))
 
             # 3) EMBED & LƯU NGỮ NGHĨA (text_vec + image_vec)
             # 3a) Embed caption 'search' (full câu)
             try:
                 v_cap = embed_text(cap)          # -> list[512]
-                _upsert_text_and_vec(sku_id, cap, v_cap, model_name="openclip_vit_b32")
+                _upsert_text_and_vec(curr_sku_id, cap, v_cap, model_name="openclip_vit_b32")
             except Exception:
-                current_app.logger.warning("Embed caption failed (sku=%s)", sku_id)
+                current_app.logger.warning("Embed caption failed (sku=%s)", curr_sku_id)
 
             # 3b) Embed từng "đoạn" (nếu bạn muốn thêm nhiều hàng text để phủ token)
             try:
                 for seg in split_segments(cap):
                     if seg and seg.strip():
                         v_seg = embed_text(seg)
-                        _upsert_text_and_vec(sku_id, seg, v_seg, model_name="openclip_vit_b32")
+                        _upsert_text_and_vec(curr_sku_id, seg, v_seg, model_name="openclip_vit_b32")
             except Exception:
                 pass  # không bắt buộc
 
@@ -227,7 +309,7 @@ def captions_autogen_qwen():
 
         except Exception:
             fail += 1
-            current_app.logger.exception("Autogen error img_id=%s sku_id=%s", img_id, sku_id)
+            current_app.logger.exception("Autogen error img_id=%s sku_id=%s", img_id, curr_sku_id)
 
     # 4) Refresh corpus để BM25/fuzzy bắt kịp caption mới
     try:
@@ -235,8 +317,15 @@ def captions_autogen_qwen():
     except Exception:
         pass
 
-    flash(f"Autogen QWEN (lưu ngữ nghĩa): OK={done}, FAIL={fail}", "success" if fail==0 else "warning")
-    return redirect(url_for("skus_bp.skus"))
+    # Different success message for single SKU vs batch
+    if sku_id:
+        flash(f"Tạo caption cho SKU #{sku_id}: OK={done}, FAIL={fail}", "success" if fail==0 else "warning")
+        return redirect(url_for("sku_texts_bp.sku_texts", sku_id=sku_id))
+    else:
+        flash(f"Autogen QWEN (lưu ngữ nghĩa): OK={done}, FAIL={fail}", "success" if fail==0 else "warning")
+        return redirect(url_for("skus_bp.skus"))
+
+
 
 @bp.post("/captions/suggest", endpoint="captions_suggest")
 def captions_suggest():
@@ -448,5 +537,142 @@ def captions_pending_review():
         
     except Exception as e:
         current_app.logger.exception("Error fetching pending review captions")
+        return {"ok": False, "error": str(e)}, 500
+
+@bp.post("/admin/captions/test_qwen/<int:sku_id>")
+def test_qwen_caption(sku_id):
+    """
+    Test endpoint để tạo caption cho 1 ảnh của SKU và trả về JSON
+    Không lưu vào database, chỉ test generation
+    """
+    try:
+        from tools.qwen2vl_autogen import generate_caption
+        from PIL import Image
+    except Exception as e:
+        return {"ok": False, "error": f"Cannot load qwen module: {str(e)}"}, 500
+
+    # Get primary image for this SKU
+    row = q("""
+        SELECT si.id, si.sku_id, si.image_path, si.ocr_text, s.name
+        FROM sku_images si
+        JOIN skus s ON s.id = si.sku_id
+        WHERE si.sku_id = %s
+        ORDER BY si.is_primary DESC, si.id
+        LIMIT 1
+    """, (sku_id,), fetch="one")
+
+    if not row:
+        return {"ok": False, "error": f"No images found for SKU {sku_id}"}, 404
+
+    img_id, curr_sku_id, image_path, ocr_text, sku_name = row
+    upload_dir = 'E:\api_hango\flask_pgvector_shop\flask_pgvector_shop\uploads'
+    try:
+        fpath = image_path if os.path.isabs(image_path) else os.path.join(upload_dir, image_path)
+        if not os.path.exists(fpath):
+            return {"ok": False, "error": f"Image file not found: {fpath}"}, 404
+
+        img = Image.open(fpath).convert("RGB")
+        print(fpath)
+
+        # Generate prompts
+        prompt_search = PROMPT_SEARCH + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
+        prompt_seo    = PROMPT_SEO    + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
+
+        # Test caption generation
+        start_time = time.time()
+        
+        search_caption = generate_caption(img, prompt_search)
+        search_time = time.time() - start_time
+        
+        seo_start = time.time()
+        seo_caption = generate_caption(img, prompt_seo)
+        seo_time = time.time() - seo_start
+
+        total_time = time.time() - start_time
+        return {
+            "ok": True,
+            "sku_id": sku_id,
+            "sku_name": sku_name,
+            "image_path": image_path,
+            "fpath": fpath,
+            "image_id": img_id,
+            "ocr_text": ocr_text,
+            "captions": {
+                "search": {
+                    "text": search_caption,
+                    "prompt": prompt_search,
+                    "generation_time": round(search_time, 2)
+                },
+                "seo": {
+                    "text": seo_caption,
+                    "prompt": prompt_seo,
+                    "generation_time": round(seo_time, 2)
+                }
+            },
+            "total_time": round(total_time, 2),
+            "model_info": {
+                "backend": os.getenv("QWEN_VL_BACKEND", "transformers"),
+                "model_path": os.getenv("QWEN_GGUF", ""),
+                "hf_base": os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct")
+            }
+        }
+
+    except Exception as e:
+        current_app.logger.exception("Error testing Qwen caption generation")
+        return {"ok": False, "error": str(e)}, 500
+
+@bp.post("/admin/captions/save_test_caption")
+def save_test_caption():
+    """
+    Lưu caption đã test vào database
+    Expects JSON: {"sku_id": 123, "image_path": "...", "search_caption": "...", "seo_caption": "...}
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return {"ok": False, "error": "No JSON data provided"}, 400
+
+        required_fields = ["sku_id", "image_path", "search_caption", "seo_caption"]
+        for field in required_fields:
+            if not data.get(field):
+                return {"ok": False, "error": f"Missing field: {field}"}, 400
+
+        sku_id = int(data["sku_id"])
+        image_path = data["image_path"]
+        search_caption = data["search_caption"].strip()
+        seo_caption = data["seo_caption"].strip()
+
+        # Save both captions
+        exec_sql("""
+            INSERT INTO sku_captions
+                (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
+            VALUES (%s,%s,'vi','search',%s,%s,'v1',TRUE)
+            ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
+               SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
+        """, (sku_id, image_path, search_caption, "qwen2vl-test"))
+
+        exec_sql("""
+            INSERT INTO sku_captions
+                (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
+            VALUES (%s,%s,'vi','seo',%s,%s,'v1',TRUE)
+            ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version) DO UPDATE
+               SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
+        """, (sku_id, image_path, seo_caption, "qwen2vl-test"))
+
+        # Refresh corpus
+        try:
+            exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "message": f"Saved captions for SKU {sku_id}",
+            "sku_id": sku_id,
+            "captions_saved": 2
+        }
+
+    except Exception as e:
+        current_app.logger.exception("Error saving test caption")
         return {"ok": False, "error": str(e)}, 500
 

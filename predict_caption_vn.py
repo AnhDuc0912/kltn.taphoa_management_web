@@ -1,127 +1,373 @@
-"""
-predict_caption_vn.py
-
-Load the Qwen2-VL checkpoint (HuggingFace transformers with optional LoRA)
-and generate Vietnamese captions for given images and prompts.
-
-Usage: set environment variables QWEN_VL_BASE (hf repo id) and optionally QWEN_LORA_PATH,
-then run this script. It will use transformers backend with LoRA if QWEN_USE_LORA=1.
-"""
-import os
-from dotenv import load_dotenv
-import sys
-import time
+# predict_caption_vn.py  (2-pass: caption -> facets JSON)
+import os, sys, time, json, re, unicodedata, ast
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from PIL import Image
+from dotenv import load_dotenv
 
-# Load .env file
 load_dotenv()
 
-# Debug: Print environment variables to check
-print("🔍 Debug: QWEN_USE_LORA =", os.environ.get("QWEN_USE_LORA"))
-print("🔍 Debug: QWEN_LORA_PATH =", os.environ.get("QWEN_LORA_PATH"))
-print("🔍 Debug: QWEN_VL_BASE =", os.environ.get("QWEN_VL_BASE"))
-print("🔍 Debug: Current working directory =", os.getcwd())
+# ============== utils ==============
+def _vn_norm(s: str) -> str:
+    s = unicodedata.normalize("NFKD", (s or "").strip().lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9 \-\.x/]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-def generate_with_transformers(base_model: str, img: Image.Image, prompt: str, max_new_tokens: int = 64, device: Optional[str] = None) -> str:
+def _dedup_list_str(xs: Any, max_items: int = 12) -> List[str]:
+    out, seen = [], set()
+    if isinstance(xs, (list, tuple)):
+        for x in xs:
+            if x is None: 
+                continue
+            s = str(x).strip()
+            if not s:
+                continue
+            key = _vn_norm(s)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(s.strip())
+            if len(out) >= max_items:
+                break
+    elif isinstance(xs, str) and xs.strip():
+        out = [xs.strip()]
+    return out or ["không xác định"]  # Đảm bảo không trả về mảng rỗng
+
+def _ensure_str(x: Any) -> Optional[str]:
+    if x is None: 
+        return None
+    s = str(x).strip()
+    return s or None
+
+def _safe_json_extract(txt: str) -> Dict[str, Any]:
+    txt = txt.strip()
+    # 1) JSON trực tiếp
+    try:
+        return json.loads(txt)
+    except Exception:
+        pass
+    # 2) Lấy khối {...} dài nhất
+    try:
+        stack, best = [], None
+        for i, ch in enumerate(txt):
+            if ch == '{':
+                stack.append(i)
+            elif ch == '}' and stack:
+                j = stack.pop()
+                cand = txt[j:i+1]
+                if best is None or len(cand) > len(best):
+                    best = cand
+        if best:
+            return json.loads(best)
+    except Exception:
+        pass
+    # 3) literal_eval (chấp nhận quote đơn)
+    try:
+        obj = ast.literal_eval(txt)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return {}
+
+def _regex_extract_size(s: str) -> Optional[str]:
+    pat = r'(\d+(?:[.,]\d+)?\s?(?:g|kg|ml|l|lit|lít|oz|pack|bịch|hộp))'
+    m = re.search(pat, s.lower())
+    return m.group(1) if m else None
+
+# ============== Transformers backend (CPU ok) ==============
+def _load_processor_model_vl(base_model: str, device: str = "cpu"):
     import torch
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
-    from peft import PeftModel
 
-    device = device or "cpu"  # Force CPU as no CUDA is available
-    print(f"🔍 Loading processor for base model: {base_model}")
-    processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True)
-    
-    print(f"🔍 Loading base model: {base_model} on {device} with dtype=torch.float32")
-    model = Qwen2VLForConditionalGeneration.from_pretrained(base_model, trust_remote_code=True, torch_dtype=torch.float32).to(device)
+    processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True, use_fast=False)
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        base_model, trust_remote_code=True, torch_dtype=torch.float32
+    ).to(device)
 
-    # Load LoRA checkpoint if enabled
+    # LoRA (tuỳ chọn)
     if os.environ.get("QWEN_USE_LORA", "0") == "1":
+        from peft import PeftModel
         lora_path = os.environ.get("QWEN_LORA_PATH")
-        print(f"🔍 Checking LoRA path: {lora_path}")
         if not lora_path or not Path(lora_path).exists():
-            raise RuntimeError(f"LoRA path {lora_path} does not exist or is not set")
-        # Use the latest checkpoint (e.g., checkpoint-18-lora)
-        checkpoint_path = Path(lora_path) / "checkpoint-18-lora"
-        if checkpoint_path.exists():
-            lora_path = str(checkpoint_path)
-            print(f"🔍 Using specific LoRA checkpoint: {lora_path}")
-        print(f"🔍 Loading LoRA checkpoint from: {lora_path}")
+            raise RuntimeError(f"LoRA path {lora_path} does not exist")
+        ck = Path(lora_path) / "checkpoint-18-lora"
+        if ck.exists():
+            lora_path = str(ck)
         model = PeftModel.from_pretrained(model, lora_path)
-        print(f"✅ LoRA checkpoint loaded successfully. Model is now a PeftModel.")
         model.eval()
 
-    # Build input for Qwen2-VL using proper format
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},  # Use type instead of key
-                {"type": "text", "text": prompt or "Mô tả ảnh này bằng tiếng Việt"}
-            ]
-        }
-    ]
-    
-    # Apply chat template
-    text_prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    print(f"🔍 Generated text prompt type: {type(text_prompt)}")
-    print(f"🔍 Generated text prompt: {text_prompt}")
+    # an toàn sinh
+    if getattr(model.config, "use_cache", None) is not None:
+        model.config.use_cache = False
+    if model.config.pad_token_id is None:
+        model.config.pad_token_id = model.config.eos_token_id
+    return processor, model
 
-    # Prepare inputs - use lists for batch processing
-    inputs = processor(
-        text=[text_prompt],  # Make it a list
-        images=[img],        # Make it a list
-        padding=True,
-        return_tensors="pt"
-    ).to(device)
-    print(f"🔍 Input keys: {list(inputs.keys())}")
+def _gen_caption_from_image(base_model: str, img: Image.Image,
+                            max_new_tokens: int = 100, device: str = "cpu") -> str:
+    """
+    PASS 1: chỉ xin caption 1-2 câu, tránh JSON để giảm 'áp lực' định dạng.
+    """
+    import torch
+    processor, model = _load_processor_model_vl(base_model, device=device)
+
+    sys_prompt = "Bạn là AI mô tả sản phẩm bằng tiếng Việt, tập trung vào các đặc điểm nổi bật."
+    user_text = "Mô tả sản phẩm trong ảnh bằng 1-2 câu, bao gồm màu sắc, chất liệu, bao bì, kích thước (nếu có), và các đặc điểm chính. Trả lời khách quan, không phóng đại."
+
+    messages = [
+        {"role":"system","content": sys_prompt},
+        {"role":"user","content":[{"type":"image"},{"type":"text","text": user_text}]}
+    ]
+    chat_text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    inputs = processor(text=[chat_text], images=[img.convert("RGB")], padding=True, return_tensors="pt").to(device)
 
     with torch.inference_mode():
-        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        out_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,     # greedy cho caption ngắn, giảm noise
+            temperature=None,
+            repetition_penalty=1.05,
+        )
+    in_len = inputs["input_ids"].shape[1]
+    gen_ids = out_ids[0, in_len:] if out_ids.ndim==2 and out_ids.shape[1]>in_len else out_ids[0]
+    txt = processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
-    # Decode output - handle batch output
-    input_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
-    generated_ids = outputs[0, input_len:] if input_len and outputs.ndim == 2 and outputs.shape[1] > input_len else outputs[0]
-    caption = processor.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-    print(f"🔍 Raw decoded output: {caption}")
-    return caption
+    # lọc caption quá chung chung
+    bad = {"sản phẩm trong hình", "sản phẩm", "hình ảnh sản phẩm"}
+    if _vn_norm(txt) in set(map(_vn_norm, bad)):
+        return ""
+    return txt
 
-def predict_for_images(image_paths: List[str], prompts: List[str], max_new_tokens: int = 64):
-    base = os.environ.get("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct")
-    results = []
+def _gen_facets_from_text(base_model: str, text_input: str, max_new_tokens: int = 196, device: str = "cpu") -> Dict[str, Any]:
+    """
+    PASS 2: text-only → JSON facets. Thêm few-shot đa dạng để tăng tính tổng quát.
+    Dùng chính Qwen2-VL ở chế độ text-only (rẻ hơn vision).
+    """
+    import torch
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
-    for img_path in image_paths:
-        p = Path(img_path)
+    processor = AutoProcessor.from_pretrained(base_model, trust_remote_code=True, use_fast=False)
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        base_model, trust_remote_code=True, torch_dtype=torch.float32
+    ).to(device)
+    if getattr(model.config, "use_cache", None) is not None:
+        model.config.use_cache = False
+    if model.config.pad_token_id is None:
+        model.config.pad_token_id = model.config.eos_token_id
+
+    fewshot = [
+        {
+            "role": "user",
+            "content": [{"type":"text","text":
+                "Caption: 'Snack nui chiên giòn vị cay phô mai trong túi nhựa trong suốt màu vàng cam.'\n"
+                "OCR: ''\nHãy trích JSON facet như schema quy định."
+            }]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type":"text","text":
+                '{"caption":"Snack nui chiên giòn vị cay phô mai trong túi nhựa trong suốt màu vàng cam.",'
+                '"keywords":["snack","nui chiên","phô mai","cay","giòn"],'
+                '"colors":["vàng","cam"],"shapes":["hạt"],"materials":["nhựa"],"packaging":["túi trong suốt"],'
+                '"taste":["cay","phô mai"],"texture":["giòn"],'
+                '"brand_guess":null,"variant_guess":"cay phô mai","size_guess":null,"category_guess":"snack",'
+                '"facet_scores":{"colors":[["vàng",0.9],["cam",0.7]],"materials":[["nhựa",0.8]]}}'
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{"type":"text","text":
+                "Caption: 'Nước ngọt Coca-Cola chai nhựa 500ml màu bạc.'\n"
+                "OCR: 'Coca-Cola 500ml'\nHãy trích JSON facet như schema quy định."
+            }]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type":"text","text":
+                '{"caption":"Nước ngọt Coca-Cola chai nhựa 500ml màu bạc.",'
+                '"keywords":["nước ngọt","Coca-Cola","chai nhựa"],'
+                '"colors":["bạc"],"shapes":["chai"],"materials":["nhựa"],"packaging":["chai"],'
+                '"taste":["ngọt"],"texture":[],'
+                '"brand_guess":"Coca-Cola","variant_guess":null,"size_guess":"500ml","category_guess":"nước giải khát",'
+                '"facet_scores":{"colors":[["bạc",0.95]],"materials":[["nhựa",0.9]]}}'
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{"type":"text","text":
+                "Caption: 'Áo thun nam màu đen, chất liệu cotton, in logo nhỏ màu trắng.'\n"
+                "OCR: ''\nHãy trích JSON facet như schema quy định."
+            }]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type":"text","text":
+                '{"caption":"Áo thun nam màu đen, chất liệu cotton, in logo nhỏ màu trắng.",'
+                '"keywords":["áo thun","áo nam","cotton","logo"],'
+                '"colors":["đen","trắng"],"shapes":["áo"],"materials":["cotton"],"packaging":["túi nhựa"],'
+                '"taste":[],"texture":["mềm"],'
+                '"brand_guess":null,"variant_guess":null,"size_guess":null,"category_guess":"quần áo",'
+                '"facet_scores":{"colors":[["đen",0.9],["trắng",0.7]],"materials":[["cotton",0.95]]}}'
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{"type":"text","text":
+                "Caption: 'Máy xay sinh tố màu trắng, dung tích 1.5 lít, chất liệu nhựa cao cấp.'\n"
+                "OCR: '1.5L'\nHãy trích JSON facet như schema quy định."
+            }]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type":"text","text":
+                '{"caption":"Máy xay sinh tố màu trắng, dung tích 1.5 lít, chất liệu nhựa cao cấp.",'
+                '"keywords":["máy xay","sinh tố","nhựa cao cấp"],'
+                '"colors":["trắng"],"shapes":["máy xay"],"materials":["nhựa"],"packaging":["hộp"],'
+                '"taste":[],"texture":[],'
+                '"brand_guess":null,"variant_guess":null,"size_guess":"1.5 lít","category_guess":"đồ gia dụng",'
+                '"facet_scores":{"colors":[["trắng",0.9]],"materials":[["nhựa",0.85]]}}'
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{"type":"text","text":
+                "Caption: 'Son môi màu đỏ đậm, vỏ kim loại ánh bạc, dạng thỏi.'\n"
+                "OCR: ''\nHãy trích JSON facet như schema quy định."
+            }]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type":"text","text":
+                '{"caption":"Son môi màu đỏ đậm, vỏ kim loại ánh bạc, dạng thỏi.",'
+                '"keywords":["son môi","đỏ đậm","thỏi"],'
+                '"colors":["đỏ","bạc"],"shapes":["thỏi"],"materials":["kim loại"],"packaging":["thỏi"],'
+                '"taste":[],"texture":["mịn"],'
+                '"brand_guess":null,"variant_guess":"đỏ đậm","size_guess":null,"category_guess":"mỹ phẩm",'
+                '"facet_scores":{"colors":[["đỏ",0.9],["bạc",0.8]],"materials":[["kim loại",0.9]]}}'
+            }]
+        }
+    ]
+
+    system_prompt = (
+        "Bạn là AI trích xuất facet sản phẩm từ văn bản tiếng Việt. "
+        "Phân tích caption và OCR để tạo JSON hợp lệ theo schema. "
+        "Suy luận các đặc điểm như màu sắc, chất liệu, bao bì, hình dạng, v.v., từ văn bản. "
+        "Các trường keywords, colors, materials, shapes BẮT BUỘC phải có ít nhất một giá trị, "
+        "sử dụng suy luận hợp lý hoặc giá trị mặc định nếu không có thông tin rõ ràng."
+    )
+    user_prompt = (
+        "Schema JSON bắt buộc:\n"
+        '{ "caption": "...", "keywords": [], "colors": [], "shapes": [], "materials": [], '
+        '"packaging": [], "taste": [], "texture": [], '
+        '"brand_guess": null, "variant_guess": null, "size_guess": null, "category_guess": null, '
+        '"facet_scores": {} }\n'
+        "Nguồn:\n"
+        f"Caption: '{text_input.strip()}'\n"
+        "OCR: ''\n"
+        "Yêu cầu: Trích xuất facet chính xác từ caption và OCR. "
+        "Điền các trường keywords, colors, materials, shapes BẮT BUỘC có ít nhất một giá trị, "
+        "dựa trên caption hoặc suy luận hợp lý (ví dụ: nếu không rõ màu thì dùng 'không xác định', "
+        "nếu không rõ chất liệu thì dùng 'nhựa' hoặc 'vải' tùy danh mục). "
+        "Các trường khác để rỗng hoặc null nếu không có dữ liệu. Trả đúng JSON."
+    )
+
+    messages = [{"role":"system","content": system_prompt}] + fewshot + [
+        {"role":"user","content":[{"type":"text","text": user_prompt}]}
+    ]
+
+    chat_text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    inputs = processor(text=[chat_text], images=None, padding=True, return_tensors="pt").to(device)
+
+    with torch.inference_mode():
+        out_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=None,
+            repetition_penalty=1.05,
+        )
+    in_len = inputs["input_ids"].shape[1]
+    gen_ids = out_ids[0, in_len:] if out_ids.ndim==2 and out_ids.shape[1]>in_len else out_ids[0]
+    txt = processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+    data = _safe_json_extract(txt)
+
+    # Đảm bảo các trường bắt buộc không rỗng
+    if not data.get("keywords"):
+        data["keywords"] = ["sản phẩm"]  # Mặc định nếu không có keywords
+    if not data.get("colors"):
+        data["colors"] = ["không xác định"]  # Mặc định nếu không có màu
+    if not data.get("materials"):
+        data["materials"] = ["nhựa"]  # Mặc định nếu không có chất liệu
+    if not data.get("shapes"):
+        data["shapes"] = ["không xác định"]  # Mặc định nếu không có hình dạng
+    return data
+
+def generate_caption_struct(
+    img_or_path,
+    max_new_tokens: int = 128,
+    base_model: Optional[str] = None,
+    device: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    2-pass:
+      1) Vision -> caption (1-2 câu)
+      2) Text-only -> JSON facets từ caption
+    """
+    base = base_model or os.environ.get("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct")
+    device = device or "cpu"
+
+    if isinstance(img_or_path, str):
+        p = Path(img_or_path)
         if not p.exists():
-            print(f"❌ Image not found: {img_path}")
-            continue
+            raise FileNotFoundError(p)
         img = Image.open(p).convert("RGB")
-        for prompt in prompts:
-            start = time.time()
-            try:
-                caption = generate_with_transformers(base, img, prompt, max_new_tokens=max_new_tokens)
-                used = f"transformers ({base})"
-                elapsed = time.time() - start
-                print(f"✅ [{used}] {p.name} | Prompt: '{prompt or '(<empty> Vietnamese)'}' -> {elapsed:.1f}s")
-                print(f"   Caption (vi): {caption}\n")
-                results.append({"image": str(p), "prompt": prompt, "caption": caption, "backend": used, "time_s": elapsed})
-            except Exception as e:
-                print(f"❌ Failed to generate for {p.name} with prompt '{prompt}': {type(e).__name__}: {e}")
-                continue
-    return results
+    else:
+        img = img_or_path
 
+    # PASS 1
+    caption = _gen_caption_from_image(base, img, max_new_tokens=min(100, max_new_tokens), device=device)
+    if not caption:
+        caption = "Sản phẩm trong ảnh"
+
+    # PASS 2
+    facets = _gen_facets_from_text(base, caption, max_new_tokens=max_new_tokens, device=device)
+
+    # Hợp nhất + chuẩn hoá
+    out = {
+        "caption": _ensure_str(facets.get("caption")) or caption,
+        "keywords": _dedup_list_str(facets.get("keywords")) or ["sản phẩm"],
+        "colors": _dedup_list_str(facets.get("colors")) or ["không xác định"],
+        "shapes": _dedup_list_str(facets.get("shapes")) or ["không xác định"],
+        "materials": _dedup_list_str(facets.get("materials")) or ["nhựa"],
+        "packaging": _dedup_list_str(facets.get("packaging")),
+        "taste": _dedup_list_str(facets.get("taste")),
+        "texture": _dedup_list_str(facets.get("texture")),
+        "brand_guess": _ensure_str(facets.get("brand_guess")),
+        "variant_guess": _ensure_str(facets.get("variant_guess")),
+        "size_guess": _ensure_str(facets.get("size_guess")) or _regex_extract_size(caption) or None,
+        "category_guess": _ensure_str(facets.get("category_guess")),
+        "facet_scores": facets.get("facet_scores") if isinstance(facets.get("facet_scores"), dict) else {},
+    }
+    return out
+
+# Backward-compatible: caption-only
+def generate_caption(img_or_path, prompt: str, max_new_tokens: int = 80, backend: Optional[str] = None, hf_base: Optional[str] = None):
+    data = generate_caption_struct(img_or_path, max_new_tokens=max_new_tokens, base_model=hf_base)
+    return data.get("caption") or "Sản phẩm trong hình ảnh"
+
+# ============== CLI demo ==============
 if __name__ == "__main__":
-    images = [
-        os.environ.get("TEST_IMAGE", r"E:\api_hango\flask_pgvector_shop\flask_pgvector_shop\uploads\73_603137893c2545948b1778d813b03b24.jpg")
-    ]
-    prompts = [
-        "Mô tả ảnh này bằng tiếng Việt",
-        "Tên sản phẩm",
-        ""  # empty prompt -> fallback description
-    ]
-    max_tokens = int(os.environ.get("CAPTION_MAX_TOKENS", "80"))
+    img_path = os.environ.get("TEST_IMAGE", r"E:\api_hango\flask_pgvector_shop\flask_pgvector_shop\uploads\72_d1b5d89dff0b4c6096bc19ef01eb0ec0.jpg")
+    p = Path(img_path)
+    if not p.exists():
+        print(f"❌ Image not found: {img_path}")
+        sys.exit(1)
 
-    print("Starting caption prediction (Vietnamese)...")
-    print("🔍 QWEN_USE_LORA from env:", os.environ.get("QWEN_USE_LORA"))
-    predict_for_images(images, prompts, max_new_tokens=max_tokens)
+    t0 = time.time()
+    data = generate_caption_struct(str(p), max_new_tokens=int(os.environ.get("CAPTION_MAX_TOKENS","160")))
+    dt = time.time() - t0
+    print(f"\n=== {p.name} | {dt:.1f}s ===")
+    print(json.dumps(data, ensure_ascii=False, indent=2))

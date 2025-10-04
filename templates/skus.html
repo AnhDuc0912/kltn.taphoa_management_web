@@ -3,13 +3,6 @@
 <div class="d-flex align-items-center mb-3">
   <h4 class="me-auto">SKUs</h4>
   <div class="d-flex gap-2">
-    <!-- Fixed route name with blueprint -->
-    <form method="post" action="{{ url_for('captions_bp.captions_autogen_qwen') }}"
-          onsubmit="return confirm('Tạo caption + mô tả cho tất cả ảnh CHƯA có caption?')">
-      <input type="hidden" name="limit" value="200">
-      <button class="btn btn-success">⚡ Tạo caption hàng loạt (Qwen)</button>
-    </form>
-    
     <!-- Backfill text vectors button -->
     <form method="post" action="{{ url_for('admin_bp.text_vec_backfill') }}"
           onsubmit="return confirm('Tạo vector embeddings cho texts chưa có vector?')">

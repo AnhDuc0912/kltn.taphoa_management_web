@@ -17,3 +17,9 @@ def exec_sql(sql, params=None, returning=False):
             return cur.fetchone()
         conn.commit()
 
+def get_connection():
+    """
+    Return a new DB connection (caller is responsible for closing it).
+    Mirrors the underlying db.get_conn() used by q/exec_sql.
+    """
+    return get_conn()

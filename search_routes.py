@@ -1,5 +1,4 @@
-﻿
-import io, time, os
+﻿import io, time, os
 from flask import Blueprint, request, jsonify
 from PIL import Image
 from db import get_conn
@@ -121,11 +120,14 @@ def search_image():
     # log query
     qid = _q("INSERT INTO queries(type) VALUES('image') RETURNING id", fetch="one")[0]
 
+    # Use COALESCE to prefer image_vec_768, fall back to image_vec
     rows = _q("""
-        SELECT si.sku_id, si.id, si.image_path, (si.image_vec <-> %s::vector) AS dist
+        SELECT 
+            si.sku_id, si.id, si.image_path,
+            (COALESCE(si.image_vec_768, si.image_vec) <-> %s::vector) AS dist
         FROM sku_images si
-        WHERE si.image_vec IS NOT NULL
-        ORDER BY si.image_vec <-> %s::vector
+        WHERE COALESCE(si.image_vec_768, si.image_vec) IS NOT NULL
+        ORDER BY (COALESCE(si.image_vec_768, si.image_vec) <-> %s::vector)
         LIMIT %s
     """, (vec, vec, k))
 

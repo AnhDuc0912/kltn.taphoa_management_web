@@ -11,10 +11,9 @@
   </form>
 
   <!-- nút tạo caption Qwen cho từng sản phẩm -->
-  <form method="post" action="{{ url_for('captions_bp.captions_autogen_qwen') }}"
+  <form method="post" action="{{ url_for('captions_bp.captions_autogen', sku_id=sku[0]) }}"
         onsubmit="return confirm('Tạo caption + mô tả cho sản phẩm này?')"
         class="me-2">
-    <input type="hidden" name="sku_id" value="{{ sku[0] }}">
     <input type="hidden" name="limit" value="1">
     <button class="btn btn-warning">✳️ Tạo caption Qwen cho sản phẩm này</button>
   </form>
@@ -202,4 +201,121 @@
     </div>
   </div>
 </div>
+
+<div class="card mt-3">
+  <div class="card-header py-2 d-flex align-items-center">
+    <b class="me-auto">📄 Captions đã tạo (theo ảnh & style)</b>
+    <form class="d-inline-block" method="get" action="{{ url_for('captions_bp.captions_by_sku', sku_id=sku[0]) }}">
+      <div class="input-group input-group-sm" style="width: 360px;">
+        <select name="style" class="form-select">
+          <option value="all">Tất cả style</option>
+          <option value="search">search</option>
+          <option value="seo">seo</option>
+        </select>
+        <select name="needs_review" class="form-select">
+          <option value="all">Tất cả trạng thái</option>
+          <option value="1">Needs review</option>
+          <option value="0">Đã duyệt</option>
+        </select>
+        <button class="btn btn-outline-secondary">Lấy JSON</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card-body">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead>
+          <tr>
+            <th style="width:70px">ID</th>
+            <th>Ảnh</th>
+            <th style="width:90px">Style</th>
+            <th>Caption</th>
+            <th style="width:170px">Model</th>
+            <th style="width:120px">Trạng thái</th>
+            <th class="text-end" style="width:280px">Thao tác</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if rows_captions and rows_captions|length > 0 %}
+            {% for r in rows_captions %}
+              <tr>
+                <td class="text-muted">#{{ r.id }}</td>
+                <td>
+                  <div class="d-flex align-items-center gap-2">
+                    {% if r.image_path %}
+                      <img src="{{ (cover_url|default('') and cover_url) or url_for('static', filename=r.image_path) if False else ('/uploads/' ~ r.image_path) }}"
+                           style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #eee">
+                    {% endif %}
+                    <div>
+                      <div class="small text-muted">{{ r.image_path }}</div>
+                      {% if r.brand_guess or r.variant_guess or r.size_guess %}
+                        <div class="small">
+                          {% if r.brand_guess %}<span class="badge bg-light text-dark">brand: {{ r.brand_guess }}</span>{% endif %}
+                          {% if r.variant_guess %}<span class="badge bg-light text-dark">variant: {{ r.variant_guess }}</span>{% endif %}
+                          {% if r.size_guess %}<span class="badge bg-light text-dark">size: {{ r.size_guess }}</span>{% endif %}
+                        </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  <span class="badge {% if r.style=='search' %}bg-primary-subtle text-primary{% else %}bg-warning-subtle text-dark{% endif %}">
+                    {{ r.style }}
+                  </span>
+                </td>
+                <td style="max-width: 560px">
+                  <div>{{ r.caption_text }}</div>
+                  <div class="small text-muted mt-1">
+                    {% set badges = [] %}
+                    {% if r.keywords and r.keywords|length %}<span class="badge bg-secondary-subtle border text-dark">kw: {{ r.keywords|length }}</span>{% endif %}
+                    {% if r.colors and r.colors|length %}<span class="badge bg-secondary-subtle border text-dark">màu: {{ r.colors|length }}</span>{% endif %}
+                    {% if r.materials and r.materials|length %}<span class="badge bg-secondary-subtle border text-dark">chất liệu: {{ r.materials|length }}</span>{% endif %}
+                    {% if r.category_guess %}<span class="badge bg-light text-dark">cat: {{ r.category_guess }}</span>{% endif %}
+                    <span class="ms-2">({{ r.created_at }})</span>
+                  </div>
+                </td>
+                <td>
+                  <div class="small">{{ r.model_name }}<br><span class="text-muted">{{ r.prompt_version }}</span></div>
+                </td>
+                <td>
+                  {% if r.is_ground_truth %}
+                    <span class="badge bg-success">Ground Truth</span><br>
+                  {% endif %}
+                  {% if r.needs_review %}
+                    <span class="badge bg-danger-subtle text-danger">Needs review</span>
+                  {% else %}
+                    <span class="badge bg-success-subtle text-success">OK</span>
+                  {% endif %}
+                </td>
+                <td class="text-end">
+                  <div class="d-flex gap-1 justify-content-end">
+                    <form method="post" action="{{ url_for('captions_bp.caption_accept', caption_id=r.id) }}">
+                      <button class="btn btn-sm btn-success">✔️ Accept</button>
+                    </form>
+                    <form method="post" action="{{ url_for('captions_bp.caption_reject', caption_id=r.id) }}"
+                          onsubmit="return confirm('Reject caption này?')">
+                      <input type="hidden" name="notes" value="">
+                      <button class="btn btn-sm btn-outline-danger">❌ Reject</button>
+                    </form>
+                    <form method="post" action="{{ url_for('captions_bp.caption_ground', caption_id=r.id) }}">
+                      <button class="btn btn-sm btn-outline-success">🌟 Ground</button>
+                    </form>
+                    <form method="post" action="{{ url_for('captions_bp.caption_delete', caption_id=r.id) }}"
+                          onsubmit="return confirm('Xoá caption này?')">
+                      <button class="btn btn-sm btn-outline-secondary">🗑️ Xoá</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="7" class="text-center text-muted">Chưa có caption nào</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 {% endblock %}

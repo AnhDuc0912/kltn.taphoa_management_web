@@ -1,8 +1,8 @@
 [
   {
     "image": "E:\\api_hango\\flask_pgvector_shop\\flask_pgvector_shop\\uploads\\24_43289c3340154dd0a75e9cbc4f5a7ee5.jpg",
-    "prompt": "Mô tả sản phẩm tiêu dùng trong ảnh bằng 1-2 câu tiếng Việt, chỉ tập trung vào màu sắc, chất liệu, bao bì, và kích thước (nếu rõ ràng). Không đề cập đến rượu bia, thuốc lá, hoặc bất kỳ nội dung nhạy cảm nào. Ví dụ: 'Chai nhựa màu trong suốt chứa nước suối, dung tích 500ml.'",
-    "reason": "SAFETY (finish_reason=2)",
+    "prompt": "Mô tả ngắn các thuộc tính THỊ GIÁC (màu sắc, chất liệu, bao bì, kích thước nếu thấy rõ) bằng 1-2 câu tiếng Việt. Không nêu thương hiệu hay công dụng.",
+    "reason": "All models failed after 2 attempts: SAFETY_BLOCKED",
     "model": "gemini-2.5-flash"
   }
 ]

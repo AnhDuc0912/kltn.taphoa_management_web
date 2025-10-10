@@ -16,6 +16,7 @@ tmp_qwen_debug
 backup
 out-qwen2vl-2B-lora
 out-resnet101-triplet
-    
+out-resnet101-model
+
 *.zip
 *.bak

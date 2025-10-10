@@ -1,6 +1,7 @@
 ﻿# routes/captions.py
 import os, time
-from flask import Blueprint, request, redirect, url_for, flash, current_app
+import json  # ADD THIS LINE
+from flask import Blueprint, request, redirect, url_for, flash, current_app, jsonify
 from services.db_utils import q, exec_sql
 from services.moondream_service import md_chat_vision, _mime_from_path
 import traceback
@@ -182,83 +183,132 @@ def captions_autogen(sku_id):
 
 @bp.post("/captions/suggest", endpoint="captions_suggest")
 def captions_suggest():
-    """API endpoint to save/update caption suggestions"""
+    """API endpoint to save/update caption suggestions with full metadata"""
     try:
         d = request.get_json(force=True)
+        current_app.logger.info("captions_suggest received payload: %s", json.dumps(d, ensure_ascii=False)[:500])
         
         # Validate required fields
         required_fields = ["sku_id", "image_path", "style", "caption_text", "model_name"]
         for field in required_fields:
             if not d.get(field):
-                return {"ok": False, "error": f"Missing required field: {field}"}, 400
+                return jsonify({"ok": False, "error": f"Missing required field: {field}"}), 400
         
-        # Clean and validate caption text
         caption_text = (d["caption_text"] or "").strip()
         if not caption_text:
-            return {"ok": False, "error": "Caption text cannot be empty"}, 400
-            
-        # Generate caption embedding for search purposes
-        caption_vector = None
+            return jsonify({"ok": False, "error": "Caption text cannot be empty"}), 400
+        
+        # Extract metadata arrays (default to empty if not provided)
+        keywords = d.get("keywords", [])
+        colors = d.get("colors", [])
+        shapes = d.get("shapes", [])
+        materials = d.get("materials", [])
+        packaging = d.get("packaging", [])
+        taste = d.get("taste", [])
+        texture = d.get("texture", [])
+        
+        # Extract guess fields
+        brand_guess = d.get("brand_guess")
+        variant_guess = d.get("variant_guess")
+        size_guess = d.get("size_guess")
+        category_guess = d.get("category_guess")
+        
+        # facet_scores as JSON string (for PostgreSQL jsonb column)
+        facet_scores = d.get("facet_scores", [])
+        facet_scores_json = json.dumps(facet_scores, ensure_ascii=False) if facet_scores else None
+        
+        # Generate caption embedding
+        caption_vec_lit = None
         try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer("all-MiniLM-L6-v2")
-            # Normalize Vietnamese text if available
-            try:
-                from utils import vn_norm
-                normalized_caption = vn_norm(caption_text)
-            except ImportError:
-                normalized_caption = caption_text.lower().strip()
-            
-            embedding = model.encode(normalized_caption, normalize_embeddings=True)
-            caption_vector = embedding.tolist()
-            current_app.logger.info("Generated vector embedding for caption (dim=%d)", len(caption_vector))
+            from utils import encode_texts
+            emb = encode_texts([caption_text])[0]
+            vec_list = emb.tolist() if hasattr(emb, "tolist") else list(emb)
+            # Normalize vector
+            import math
+            norm = math.sqrt(sum(x*x for x in vec_list)) or 1.0
+            vec_normalized = [x/norm for x in vec_list]
+            caption_vec_lit = "[" + ",".join(f"{float(x):.6f}" for x in vec_normalized) + "]"
+            current_app.logger.info("Generated caption_vec with length %d", len(vec_normalized))
         except Exception as e:
             current_app.logger.warning("Failed to generate caption embedding: %s", e)
-            # Continue without vector - can be backfilled later
         
-        # Insert/update caption with vector
-        result = exec_sql("""
-            INSERT INTO sku_captions (
-                sku_id, image_path, lang, style, caption_text, 
-                caption_vector, model_name, prompt_version, needs_review, created_at, updated_at
-            )
-            VALUES (%s,%s,'vi',%s,%s,%s,%s,%s,TRUE,NOW(),NOW())
-            ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version)
-            DO UPDATE SET 
-                caption_text = EXCLUDED.caption_text,
-                caption_vector = EXCLUDED.caption_vector,
-                needs_review = TRUE,
-                updated_at = NOW()
-            RETURNING id
-        """, (
+        # Build SQL params tuple
+        sql_params = (
             d["sku_id"], 
             d["image_path"], 
             d["style"], 
-            caption_text,
-            caption_vector,
+            caption_text, 
+            caption_vec_lit,
             d["model_name"], 
-            d.get("prompt_version", "v1.0")
-        ), returning=True)
+            d.get("prompt_version", "v1.0"),
+            keywords, 
+            colors, 
+            shapes, 
+            materials, 
+            packaging, 
+            taste, 
+            texture,
+            brand_guess, 
+            variant_guess, 
+            size_guess, 
+            category_guess, 
+            facet_scores_json
+        )
         
-        caption_id = result[0][0] if result else None
+        current_app.logger.info("SQL params prepared (types): %s", 
+            [type(p).__name__ for p in sql_params])
         
-        # Auto-refresh search corpus to include new caption
+        # Insert/update with full metadata
+        result = exec_sql("""
+            INSERT INTO sku_captions (
+                sku_id, image_path, lang, style, caption_text, caption_vec,
+                model_name, prompt_version, needs_review,
+                keywords, colors, shapes, materials, packaging, taste, texture,
+                brand_guess, variant_guess, size_guess, category_guess, facet_scores,
+                created_at
+            )
+            VALUES (%s,%s,'vi',%s,%s,%s::vector,%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version)
+            DO UPDATE SET 
+                caption_text = EXCLUDED.caption_text,
+                caption_vec = EXCLUDED.caption_vec,
+                keywords = EXCLUDED.keywords,
+                colors = EXCLUDED.colors,
+                shapes = EXCLUDED.shapes,
+                materials = EXCLUDED.materials,
+                packaging = EXCLUDED.packaging,
+                taste = EXCLUDED.taste,
+                texture = EXCLUDED.texture,
+                brand_guess = EXCLUDED.brand_guess,
+                variant_guess = EXCLUDED.variant_guess,
+                size_guess = EXCLUDED.size_guess,
+                category_guess = EXCLUDED.category_guess,
+                facet_scores = EXCLUDED.facet_scores,
+                needs_review = TRUE
+            RETURNING id
+        """, sql_params, returning=True)
+        
+        caption_id = result[0] if result else None
+        current_app.logger.info("Caption saved successfully with id=%s", caption_id)
+        
+        # Refresh corpus (non-blocking)
         try:
-            exec_sql("REFRESH MATERIALIZED VIEW CONCURRENTLY sku_search_corpus")
-            current_app.logger.info("Auto-refreshed search corpus after caption save")
-        except Exception as e:
-            current_app.logger.warning("Failed to refresh search corpus: %s", e)
-            # Non-fatal - corpus can be refreshed manually
+            exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
+        except Exception:
+            pass
         
-        return {
-            "ok": True, 
-            "caption_id": caption_id,
-            "message": "Caption saved successfully with vector embedding"
-        }
+        return jsonify({"ok": True, "caption_id": caption_id, "message": "Caption saved successfully"})
         
     except Exception as e:
         current_app.logger.exception("Error saving caption suggestion")
-        return {"ok": False, "error": str(e)}, 500
+        # Return detailed error for debugging
+        import traceback
+        error_detail = {
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+        return jsonify({"ok": False, **error_detail}), 500
 
 @bp.post("/captions/<int:caption_id>/label", endpoint="captions_label")
 def captions_label(caption_id):
@@ -636,3 +686,74 @@ def caption_delete(caption_id: int):
     exec_sql("DELETE FROM sku_captions WHERE id=%s", (caption_id,))
     flash(f"Đã xoá caption #{caption_id}", "secondary")
     return redirect(request.referrer or url_for("skus_bp.skus"))
+
+@bp.get("/api/captions/pending", endpoint="api_captions_pending")
+def api_captions_pending():
+    """
+    API: Lấy danh sách ảnh chưa có caption
+    Query params:
+      - sku_id: filter by SKU (optional)
+      - limit: max results (default 100)
+      - model_name: filter images without captions from this model (optional)
+    Returns: {"ok": true, "images": [{sku_id, image_id, image_path, ocr_text}, ...]}
+    """
+    try:
+        sku_id = request.args.get("sku_id", type=int)
+        limit = request.args.get("limit", type=int, default=100)
+        model_name = request.args.get("model_name", type=str)
+        
+        where_clauses = []
+        params = []
+        
+        if sku_id:
+            where_clauses.append("si.sku_id = %s")
+            params.append(sku_id)
+        
+        # Chỉ lấy ảnh chưa có caption style='search' với model_name cụ thể
+        if model_name:
+            where_clauses.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM sku_captions sc 
+                    WHERE sc.sku_id = si.sku_id 
+                      AND sc.image_path = si.image_path 
+                      AND sc.style = 'search'
+                      AND sc.model_name = %s
+                )
+            """)
+            params.append(model_name)
+        else:
+            # Fallback: chưa có caption nào với style='search'
+            where_clauses.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM sku_captions sc 
+                    WHERE sc.sku_id = si.sku_id 
+                      AND sc.image_path = si.image_path 
+                      AND sc.style = 'search'
+                )
+            """)
+        
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        params.append(limit)
+        
+        rows = q(f"""
+            SELECT si.id as image_id, si.sku_id, si.image_path, si.ocr_text
+            FROM sku_images si
+            WHERE {where_sql}
+            ORDER BY si.sku_id, si.is_primary DESC, si.id
+            LIMIT %s
+        """, tuple(params))
+        
+        images = []
+        for row in (rows or []):
+            images.append({
+                "image_id": row[0],
+                "sku_id": row[1],
+                "image_path": row[2],
+                "ocr_text": row[3]
+            })
+        
+        return jsonify({"ok": True, "images": images, "count": len(images)})
+        
+    except Exception as e:
+        current_app.logger.exception("Error in api_captions_pending")
+        return jsonify({"ok": False, "error": str(e)}), 500

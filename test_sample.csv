@@ -1,0 +1,2 @@
+sku_id;image_path;caption_text;keywords;colors;shapes;materials;packaging;taste;texture;brand_guess;variant_guess;size_guess;category_guess;facet_scores
+3;3_836ad79412964175b2df3afaa3e3d59c.png;Đây là một gói bánh ChocoPN phủ sô cô la. Bánh có lớp kem ở giữa.;['bánh', 'choco pn', 'sô cô la', 'bánh quy'];['đỏ', 'nâu', 'trắng', 'vàng'];['tròn'];['sô cô la', 'bột mì', 'kem'];['gói'];['sô cô la', 'ngọt'];['mềm', 'xốp'];chocopn;bánh phủ sô cô la;;bánh quy;[{'facet': 'deliciousness', 'score': 0.9}, {'facet': 'convenience', 'score': 0.7}]

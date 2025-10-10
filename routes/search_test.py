@@ -104,17 +104,18 @@ def search_similar_skus():
     query = request.args.get("q", "").strip()
     top_k = int(request.args.get("top_k", 10))
     threshold = float(request.args.get("threshold", 0.3))
-    
+
     if not query:
         return jsonify({"error": "Query text is required"}), 400
-    
+
     try:
         query_vec = embed_text(query)
         query_vec_lit = _vec_literal(_l2norm(query_vec)) if query_vec else None
-        
+
         if not query_vec_lit:
             return jsonify({"error": "Embedding failed", "results": []}), 500
 
+        # --------- PHƯƠNG ÁN A: dùng unaccent (khuyến nghị) ----------
         sql = """
             WITH combined_results AS (
                 SELECT 
@@ -134,10 +135,11 @@ def search_similar_skus():
                   AND sc.style = 'search'
                   AND sc.caption_vec IS NOT NULL
                   AND 1 - (sc.caption_vec <=> %s::vector) > %s
-                  AND to_tsvector('simple', sc.caption_text || ' ' || array_to_string(sc.keywords, ' ')) @@ to_tsquery('simple', %s)
-                
+                  AND to_tsvector('simple', unaccent(sc.caption_text || ' ' || array_to_string(sc.keywords, ' '))) 
+                        @@ plainto_tsquery('simple', unaccent(%s))
+
                 UNION ALL
-                
+
                 SELECT 
                     st.sku_id, 
                     NULL AS image_path, 
@@ -153,17 +155,71 @@ def search_similar_skus():
                 FROM sku_texts st
                 WHERE st.text_vec IS NOT NULL
                   AND 1 - (st.text_vec <=> %s::vector) > %s
-                  AND to_tsvector('simple', st.text) @@ to_tsquery('simple', %s)
+                  AND to_tsvector('simple', unaccent(st.text)) 
+                        @@ plainto_tsquery('simple', unaccent(%s))
             )
             SELECT * FROM combined_results
             ORDER BY similarity DESC
             LIMIT %s
         """
-        params = (query_vec_lit, query_vec_lit, threshold, vn_norm(query), 
-                  query_vec_lit, query_vec_lit, threshold, vn_norm(query), top_k)
-        
+        params = (
+            query_vec_lit, query_vec_lit, threshold, query,  # block 1
+            query_vec_lit, query_vec_lit, threshold, query,  # block 2
+            top_k
+        )
+
+        # --------- PHƯƠNG ÁN B (nếu chưa có extension unaccent) ----------
+        # Chỉ cần thay sql ở trên bằng đoạn dưới (và giữ nguyên params):
+        #
+        # sql = """
+        #     WITH combined_results AS (
+        #         SELECT 
+        #             sc.sku_id, 
+        #             sc.image_path, 
+        #             sc.caption_text AS text, 
+        #             sc.keywords, 
+        #             sc.colors, 
+        #             sc.materials,
+        #             sc.brand_guess, 
+        #             sc.size_guess, 
+        #             sc.category_guess,
+        #             1 - (sc.caption_vec <=> %s::vector) AS similarity,
+        #             'caption' AS source
+        #         FROM sku_captions sc
+        #         WHERE sc.lang = 'vi' 
+        #           AND sc.style = 'search'
+        #           AND sc.caption_vec IS NOT NULL
+        #           AND 1 - (sc.caption_vec <=> %s::vector) > %s
+        #           AND to_tsvector('simple', sc.caption_text || ' ' || array_to_string(sc.keywords, ' ')) 
+        #                 @@ plainto_tsquery('simple', %s)
+        #
+        #         UNION ALL
+        #
+        #         SELECT 
+        #             st.sku_id, 
+        #             NULL AS image_path, 
+        #             st.text AS text, 
+        #             ARRAY[]::text[] AS keywords, 
+        #             ARRAY[]::text[] AS colors, 
+        #             ARRAY[]::text[] AS materials,
+        #             NULL AS brand_guess, 
+        #             NULL AS size_guess, 
+        #             NULL AS category_guess,
+        #             1 - (st.text_vec <=> %s::vector) AS similarity,
+        #             'text' AS source
+        #         FROM sku_texts st
+        #         WHERE st.text_vec IS NOT NULL
+        #           AND 1 - (st.text_vec <=> %s::vector) > %s
+        #           AND to_tsvector('simple', st.text) 
+        #                 @@ plainto_tsquery('simple', %s)
+        #     )
+        #     SELECT * FROM combined_results
+        #     ORDER BY similarity DESC
+        #     LIMIT %s
+        # """
+
         rows = q(sql, params)
-        
+
         out = []
         for r in rows:
             out.append({
@@ -176,10 +232,10 @@ def search_similar_skus():
                 "brand_guess": r[6],
                 "size_guess": r[7],
                 "category_guess": r[8],
-                "similarity": r[9],
+                "similarity": float(r[9]),
                 "source": r[10]
             })
-        
+
         return jsonify({
             "query": query,
             "total": len(out),

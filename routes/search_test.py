@@ -223,7 +223,7 @@ def search_similar_skus():
         out = []
         for r in rows:
             out.append({
-                "sku_id": r[0],
+                "sku_id": int(r[0]),
                 "image_path": r[1],
                 "text": r[2],
                 "keywords": r[3],
@@ -284,6 +284,8 @@ def search_image():
                     
                     _q("INSERT INTO query_candidates(query_id, sku_id, rank, score) VALUES(%s,%s,%s,%s)",
                        (qid, sku_id, rank, score), fetch=None)
+                    result["sku_id"] = int(sku_id)
+                    result["img_id"] = int(result["img_id"])
                     
                     # Get additional SKU info
                     sku_info = _q("""

@@ -115,108 +115,54 @@ def search_similar_skus():
         if not query_vec_lit:
             return jsonify({"error": "Embedding failed", "results": []}), 500
 
-        # --------- PHƯƠNG ÁN A: dùng unaccent (khuyến nghị) ----------
+        # 🔹 Dùng unaccent nếu có
         sql = """
             WITH combined_results AS (
                 SELECT 
-                    sc.sku_id, 
-                    sc.image_path, 
-                    sc.caption_text AS text, 
-                    sc.keywords, 
-                    sc.colors, 
-                    sc.materials,
-                    sc.brand_guess, 
-                    sc.size_guess, 
-                    sc.category_guess,
+                    s.id AS sku_id,
+                    s.name AS sku_name,
+                    b.name AS brand_name,
+                    sc.image_path,
+                    sc.caption_text AS text,
                     1 - (sc.caption_vec <=> %s::vector) AS similarity,
                     'caption' AS source
                 FROM sku_captions sc
-                WHERE sc.lang = 'vi' 
+                JOIN skus s ON s.id = sc.sku_id
+                LEFT JOIN brands b ON b.id = s.brand_id
+                WHERE sc.lang = 'vi'
                   AND sc.style = 'search'
                   AND sc.caption_vec IS NOT NULL
                   AND 1 - (sc.caption_vec <=> %s::vector) > %s
-                  AND to_tsvector('simple', unaccent(sc.caption_text || ' ' || array_to_string(sc.keywords, ' '))) 
-                        @@ plainto_tsquery('simple', unaccent(%s))
+                  AND to_tsvector('simple', unaccent(sc.caption_text)) @@ plainto_tsquery('simple', unaccent(%s))
 
                 UNION ALL
 
                 SELECT 
-                    st.sku_id, 
-                    NULL AS image_path, 
-                    st.text AS text, 
-                    ARRAY[]::text[] AS keywords, 
-                    ARRAY[]::text[] AS colors, 
-                    ARRAY[]::text[] AS materials,
-                    NULL AS brand_guess, 
-                    NULL AS size_guess, 
-                    NULL AS category_guess,
+                    s.id AS sku_id,
+                    s.name AS sku_name,
+                    b.name AS brand_name,
+                    COALESCE(sc.image_path, '') AS image_path,
+                    st.text AS text,
                     1 - (st.text_vec <=> %s::vector) AS similarity,
                     'text' AS source
                 FROM sku_texts st
+                JOIN skus s ON s.id = st.sku_id
+                LEFT JOIN brands b ON b.id = s.brand_id
+                LEFT JOIN sku_captions sc ON sc.sku_id = s.id
                 WHERE st.text_vec IS NOT NULL
                   AND 1 - (st.text_vec <=> %s::vector) > %s
-                  AND to_tsvector('simple', unaccent(st.text)) 
-                        @@ plainto_tsquery('simple', unaccent(%s))
+                  AND to_tsvector('simple', unaccent(st.text)) @@ plainto_tsquery('simple', unaccent(%s))
             )
             SELECT * FROM combined_results
             ORDER BY similarity DESC
             LIMIT %s
         """
+
         params = (
             query_vec_lit, query_vec_lit, threshold, query,  # block 1
             query_vec_lit, query_vec_lit, threshold, query,  # block 2
             top_k
         )
-
-        # --------- PHƯƠNG ÁN B (nếu chưa có extension unaccent) ----------
-        # Chỉ cần thay sql ở trên bằng đoạn dưới (và giữ nguyên params):
-        #
-        # sql = """
-        #     WITH combined_results AS (
-        #         SELECT 
-        #             sc.sku_id, 
-        #             sc.image_path, 
-        #             sc.caption_text AS text, 
-        #             sc.keywords, 
-        #             sc.colors, 
-        #             sc.materials,
-        #             sc.brand_guess, 
-        #             sc.size_guess, 
-        #             sc.category_guess,
-        #             1 - (sc.caption_vec <=> %s::vector) AS similarity,
-        #             'caption' AS source
-        #         FROM sku_captions sc
-        #         WHERE sc.lang = 'vi' 
-        #           AND sc.style = 'search'
-        #           AND sc.caption_vec IS NOT NULL
-        #           AND 1 - (sc.caption_vec <=> %s::vector) > %s
-        #           AND to_tsvector('simple', sc.caption_text || ' ' || array_to_string(sc.keywords, ' ')) 
-        #                 @@ plainto_tsquery('simple', %s)
-        #
-        #         UNION ALL
-        #
-        #         SELECT 
-        #             st.sku_id, 
-        #             NULL AS image_path, 
-        #             st.text AS text, 
-        #             ARRAY[]::text[] AS keywords, 
-        #             ARRAY[]::text[] AS colors, 
-        #             ARRAY[]::text[] AS materials,
-        #             NULL AS brand_guess, 
-        #             NULL AS size_guess, 
-        #             NULL AS category_guess,
-        #             1 - (st.text_vec <=> %s::vector) AS similarity,
-        #             'text' AS source
-        #         FROM sku_texts st
-        #         WHERE st.text_vec IS NOT NULL
-        #           AND 1 - (st.text_vec <=> %s::vector) > %s
-        #           AND to_tsvector('simple', st.text) 
-        #                 @@ plainto_tsquery('simple', %s)
-        #     )
-        #     SELECT * FROM combined_results
-        #     ORDER BY similarity DESC
-        #     LIMIT %s
-        # """
 
         rows = q(sql, params)
 
@@ -224,16 +170,12 @@ def search_similar_skus():
         for r in rows:
             out.append({
                 "sku_id": int(r[0]),
-                "image_path": r[1],
-                "text": r[2],
-                "keywords": r[3],
-                "colors": r[4],
-                "materials": r[5],
-                "brand_guess": r[6],
-                "size_guess": r[7],
-                "category_guess": r[8],
-                "similarity": float(r[9]),
-                "source": r[10]
+                "sku_name": r[1],
+                "brand_name": r[2],
+                "image_path": r[3],
+                "text": r[4],
+                "similarity": float(r[5]),
+                "source": r[6]
             })
 
         return jsonify({
@@ -323,6 +265,86 @@ def search_image():
         current_app.logger.exception("Image search error")
         return jsonify({"error": str(e), "results": []}), 500
     
+@bp.post("/search/text_with_image")
+def search_text_with_image():
+    data = request.get_json(silent=True) or {}
+    qtext = vn_norm((data.get("q") or "").strip())
+    k = min(int(data.get("k") or 20), 100)
+    if not qtext:
+        return jsonify({"error": "missing q"}), 400
+
+    try:
+        t0 = time.time()
+        vec = encode_texts([qtext])[0].tolist()
+
+        # Insert query record
+        qid = _q(
+            "INSERT INTO queries(type, raw_text, normalized_text) VALUES('text', %s, %s) RETURNING id",
+            (qtext, vn_norm(qtext)), fetch="one"
+        )[0]
+
+        # Lấy top-k text liên quan
+        rows = _q("""
+            SELECT st.sku_id, st.id AS sku_text_id, st.text, (st.text_vec <-> %s::vector) AS dist
+            FROM sku_texts st
+            WHERE st.text_vec IS NOT NULL
+            ORDER BY st.text_vec <-> %s::vector
+            LIMIT %s
+        """, (vec, vec, k))
+
+        if not rows:
+            return jsonify({"query_id": qid, "elapsed_ms": int((time.time()-t0)*1000), "results": []})
+
+        sku_ids = [r[0] for r in rows]
+
+        # Lấy thông tin SKU + ảnh đại diện (ảnh đầu tiên có OCR nếu có)
+        enrich = _q(f"""
+            SELECT sk.id AS sku_id,
+                   sk.name AS sku_name,
+                   COALESCE(b.name,'') AS brand_name,
+                   si.image_path,
+                   COALESCE(si.ocr_text,'') AS ocr_text
+            FROM skus sk
+            LEFT JOIN brands b ON b.id = sk.brand_id
+            LEFT JOIN LATERAL (
+                SELECT image_path, ocr_text
+                FROM sku_images
+                WHERE sku_id = sk.id
+                ORDER BY (ocr_text IS NULL) ASC, id ASC
+                LIMIT 1
+            ) si ON TRUE
+            WHERE sk.id = ANY(%s)
+        """, (sku_ids,))
+
+        info = {r[0]: {"sku_name": r[1], "brand_name": r[2], "image_path": r[3], "ocr_text": r[4]} for r in enrich}
+
+        results = []
+        for rank, (sku_id, sku_text_id, text, dist) in enumerate(rows, start=1):
+            score = 1.0 - float(dist)
+            _q("INSERT INTO query_candidates(query_id, sku_id, rank, score) VALUES(%s,%s,%s,%s)",
+               (qid, sku_id, rank, score), fetch=None)
+            extra = info.get(sku_id, {})
+            results.append({
+                "sku_id": int(sku_id),
+                "sku_text_id": int(sku_text_id),
+                "text": text,
+                "dist": float(dist),
+                "score": score,
+                "sku_name": extra.get("sku_name"),
+                "brand_name": extra.get("brand_name"),
+                "image_path": extra.get("image_path"),
+                "ocr_text": extra.get("ocr_text"),
+            })
+
+        return jsonify({
+            "query_id": qid,
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "results": results
+        })
+
+    except Exception as e:
+        current_app.logger.exception("Text-with-image search error")
+        return jsonify({"error": str(e), "results": []}), 500
     
 def embed_text(text):
     try:

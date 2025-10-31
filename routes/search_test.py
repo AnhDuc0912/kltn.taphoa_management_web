@@ -239,10 +239,155 @@ def search_text():
         current_app.logger.exception("Text search error")
         return jsonify({"error": str(e), "results": []}), 500
 
+@bp.post("/search/text_with_image")
+def search_text_with_image():
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_q = (data.get("q") or "").strip()
+        norm_q = vn_norm(raw_q)
+
+        if not norm_q:
+            return jsonify({"error": "missing q", "results": []}), 400
+
+        # Giới hạn top-k
+        try:
+            k = int(data.get("k") or 20)
+            k = max(1, min(k, 100))
+        except Exception:
+            k = 20
+
+        t0 = time.time()
+
+        # ==== Encode text để tìm kiếm ====
+        from utils import encode_texts
+        vec = encode_texts([norm_q])[0]
+        vec = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+        vec = _l2norm(vec)
+
+        # ==== Ghi log truy vấn ====
+        qid_row = _q(
+            "INSERT INTO queries(type, raw_text, normalized_text) VALUES('text', %s, %s) RETURNING id",
+            (raw_q, norm_q), fetch="one"
+        )
+        qid = int(qid_row[0]) if qid_row else None
+
+        # ==== Truy vấn top-k kết quả ====
+        rows = _q("""
+            SELECT st.sku_id,
+                   st.id AS sku_text_id,
+                   st.text AS raw_text,
+                   (st.text_vec <=> %s::vector) AS dist
+            FROM sku_texts st
+            WHERE st.text_vec IS NOT NULL
+            ORDER BY st.text_vec <=> %s::vector
+            LIMIT %s
+        """, (vec, vec, k), fetch="all")
+
+        if not rows:
+            return jsonify({
+                "query_id": qid,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "results": []
+            })
+
+        sku_ids = [int(r[0]) for r in rows]
+
+        # ==== Ghép thêm thông tin mô tả có dấu + ảnh ====
+        enrich = _q("""
+            SELECT sk.id AS sku_id,
+                   sk.name AS sku_name,
+                   COALESCE(b.name, '') AS brand_name,
+                   COALESCE(sc.caption_text, si.ocr_text, st.text, '') AS description,  -- Ưu tiên caption_text có dấu
+                   COALESCE(sc.image_path, si.image_path, '') AS image_path
+            FROM skus sk
+            LEFT JOIN brands b ON b.id = sk.brand_id
+            LEFT JOIN LATERAL (
+                SELECT caption_text, image_path
+                FROM sku_captions
+                WHERE sku_id = sk.id AND lang = 'vi' AND style = 'search'
+                ORDER BY id ASC LIMIT 1
+            ) sc ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT image_path, ocr_text
+                FROM sku_images
+                WHERE sku_id = sk.id
+                ORDER BY (ocr_text IS NULL) ASC, id ASC
+                LIMIT 1
+            ) si ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT text
+                FROM sku_texts
+                WHERE sku_id = sk.id
+                LIMIT 1
+            ) st ON TRUE
+            WHERE sk.id = ANY(%s)
+        """, (sku_ids,), fetch="all")
+
+        info = {
+            int(r[0]): {
+                "sku_name": r[1],
+                "brand_name": r[2],
+                "description": r[3],
+                "image_path": r[4],
+            } for r in enrich or []
+        }
+
+        # ==== Gộp kết quả + lưu vào query_candidates ====
+        results = []
+        for rank, (sku_id, sku_text_id, raw_text, dist) in enumerate(rows, start=1):
+            try:
+                sku_id = int(sku_id)
+                sku_text_id = int(sku_text_id)
+                dist = float(dist)
+            except Exception:
+                continue
+
+            score = 1.0 - dist
+            if qid is not None:
+                _q("""
+                    INSERT INTO query_candidates(query_id, sku_id, rank, score)
+                    VALUES(%s, %s, %s, %s)
+                """, (qid, sku_id, rank, score), fetch=None)
+
+            extra = info.get(sku_id, {})
+            results.append({
+                "sku_id": sku_id,
+                "sku_text_id": sku_text_id,
+                "description": extra.get("description") or raw_text,
+                "score": score,
+                "dist": dist,
+                "sku_name": extra.get("sku_name"),
+                "brand_name": extra.get("brand_name"),
+                "image_path": extra.get("image_path"),
+
+                # Cho Android
+                "skuId": sku_id,
+                "skuTextId": sku_text_id,
+                "skuName": extra.get("sku_name"),
+                "brandName": extra.get("brand_name"),
+                "imagePath": extra.get("image_path"),
+                "descriptionText": extra.get("description") or raw_text,
+            })
+
+        return jsonify({
+            "query_id": qid,
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "query_text": raw_q,  # ✅ bản có dấu
+            "total": len(results),
+            "results": results
+        })
+
+    except Exception as e:
+        current_app.logger.exception("Text-with-image search error")
+        return jsonify({"error": str(e), "results": []}), 500
+
 @bp.get("/search/similar-skus")
 def search_similar_skus():
     query = request.args.get("q", "").strip()
-    top_k = int(request.args.get("top_k", 10))
+    page = max(int(request.args.get("page", 1) or 1), 1)
+    # cho phép override page_size qua query ?page_size=...
+    page_size = int(request.args.get("page_size", 5) or 5)
+    page_size = max(1, min(page_size, 50))  # chặn lạm dụng
     threshold = float(request.args.get("threshold", 0.3))
 
     if not query:
@@ -251,12 +396,12 @@ def search_similar_skus():
     try:
         query_vec = embed_text(query)
         query_vec_lit = _vec_literal(_l2norm(query_vec)) if query_vec else None
-
         if not query_vec_lit:
             return jsonify({"error": "Embedding failed", "results": []}), 500
 
-        sql = """
-            WITH combined_results AS (
+        # ---- CTE base: ứng viên thô (chưa gộp SKU) ----
+        base_sql = """
+            WITH base AS (
                 SELECT 
                     sc.sku_id, 
                     sc.image_path, 
@@ -296,38 +441,66 @@ def search_similar_skus():
                   AND 1 - (st.text_vec <=> %s::vector) > %s
                   AND to_tsvector('simple', unaccent(st.text)) 
                         @@ plainto_tsquery('simple', unaccent(%s))
+            ),
+
+            -- GỘP THEO SKU: lấy dòng tốt nhất cho mỗi sku (ưu tiên caption rồi similarity)
+            collapsed AS (
+                SELECT DISTINCT ON (sku_id)
+                    sku_id, image_path, text, keywords, colors, materials,
+                    brand_guess, size_guess, category_guess, similarity, source
+                FROM base
+                ORDER BY sku_id,                -- DISTINCT ON yêu cầu cột này đứng đầu ORDER BY
+                         similarity DESC,
+                         CASE WHEN source='caption' THEN 1 ELSE 0 END DESC
+            ),
+
+            ordered AS (
+                SELECT *
+                FROM collapsed
+                ORDER BY similarity DESC, sku_id DESC
             )
-            SELECT * FROM combined_results
-            ORDER BY similarity DESC
-            LIMIT %s
         """
-        params = (
+
+        base_params = (
             query_vec_lit, query_vec_lit, threshold, query,
             query_vec_lit, query_vec_lit, threshold, query,
-            top_k
         )
 
-        rows = _q(sql, params)
+        # ---- Đếm tổng sau khi gộp SKU ----
+        count_sql = base_sql + " SELECT COUNT(*) FROM ordered; "
+        total = _q(count_sql, base_params, fetch="one")[0]   # ✅ fetch tuple -> lấy [0]
 
-        # Tạo query log
+        # ---- Lấy trang hiện tại ----
+        offset = (page - 1) * page_size
+        page_sql = base_sql + " SELECT * FROM ordered OFFSET %s LIMIT %s; "
+        page_params = base_params + (offset, page_size)
+
+        rows = _q(page_sql, page_params, fetch="all")
+
+        # ---- Log query ----
         qid = _q(
             "INSERT INTO queries(type, raw_text, normalized_text) VALUES('text', %s, %s) RETURNING id",
             (query, vn_norm(query)), fetch="one"
         )[0]
 
         out = []
-        for rank, r in enumerate(rows, start=1):
+        for idx, r in enumerate(rows, start=1):
+            # rows là tuple theo thứ tự trong SELECT của collapsed/ordered
             feats = {
                 "similarity": float(r[9]),
-                "rank": int(rank),
+                "rank": int(offset + idx),
                 "source": r[10],
                 "keywords_count": int(len(r[3]) if r[3] else 0),
             }
-            _q(
-                "INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features) "
-                "VALUES(%s,%s,%s,%s,%s)",
-                (qid, int(r[0]), rank, float(r[9]), pg_extras.Json(feats)), fetch=None
-            )
+            try:
+                _q(
+                    "INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features) "
+                    "VALUES(%s,%s,%s,%s,%s)",
+                    (qid, int(r[0]), feats["rank"], float(r[9]), pg_extras.Json(feats)), fetch=None
+                )
+            except Exception:
+                pass
+
             out.append({
                 "sku_id": int(r[0]),
                 "image_path": r[1],
@@ -343,7 +516,8 @@ def search_similar_skus():
                 "candidate_features": feats
             })
 
-        # RE-RANK (ghi vào cột re_rank_score, không sửa features)
+        # ---- RE-RANK trong trang (tuỳ chọn) ----
+        reranked = out
         try:
             try:
                 _RE_RANKER.reload_if_needed()
@@ -358,23 +532,34 @@ def search_similar_skus():
                        (float(rs), qid, item["sku_id"]), fetch=None)
                 except Exception:
                     pass
-
-            reranked = sorted(out,
-                              key=lambda x: x.get("re_rank_score", x.get("similarity", 0.0)),
-                              reverse=True)
+            reranked = sorted(
+                out,
+                key=lambda x: x.get("re_rank_score", x.get("similarity", 0.0)),
+                reverse=True
+            )
         except Exception:
-            reranked = []
+            pass
 
+        total_pages = (total + page_size - 1) // page_size
         return jsonify({
             "query": query,
-            "total": len(out),
+            "paging": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,                # tổng sau khi gộp SKU
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "sql_offset": offset,
+                "sql_limit": page_size
+            },
             "results": out,
             "reranked_results": reranked
-        })
+        }), 200
 
     except Exception as e:
         current_app.logger.exception("Similar SKUs search error")
         return jsonify({"error": str(e), "results": []}), 500
+
 
 @bp.post("/search/image")
 def search_image():
@@ -384,6 +569,10 @@ def search_image():
 
         file = request.files['file']
         k = min(int(request.form.get('k', 20)), 100)
+        try:
+            threshold = float(request.form.get('threshold', 0.0))  # tuỳ chọn lọc theo score
+        except Exception:
+            threshold = 0.0
 
         if file.filename == '':
             return jsonify({"error": "No file selected", "results": []})
@@ -392,75 +581,147 @@ def search_image():
             file.save(tmp.name)
 
             try:
+                # ========= TÌM ẢNH → ẢNH (FAISS) =========
                 from build_faiss_index import search_image_with_faiss
-                results = search_image_with_faiss(tmp.name, k=k)
+                raw_results = search_image_with_faiss(tmp.name, k=k) or []
+                # lọc theo threshold nếu có
+                results = [r for r in raw_results if float(r.get("score", 0.0)) >= float(threshold)]
 
                 if not results:
                     return jsonify({"error": "No results found", "results": []}), 404
 
+                # ========= GHI QUERY =========
                 qid = _q("INSERT INTO queries(type) VALUES('image') RETURNING id", fetch="one")[0]
 
-                out = []
-                for result in results:
-                    sku_id = result["sku_id"]
-                    rank = result["rank"]
-                    score = result["score"]
+                # ========= JOIN THÔNG TIN MÔ TẢ/TÊN/BRAND =========
+                sku_ids = [int(r["sku_id"]) for r in results if "sku_id" in r]
 
-                    sku_info = _q("""
-                        SELECT sk.name, b.name as brand_name, si.ocr_text
-                        FROM skus sk
-                        LEFT JOIN brands b ON b.id = sk.brand_id
-                        LEFT JOIN sku_images si ON si.sku_id = sk.id AND si.image_path = %s
-                        WHERE sk.id = %s
+                enrich_rows = _q("""
+                    SELECT sk.id AS sku_id,
+                           sk.name AS sku_name,
+                           COALESCE(b.name, '') AS brand_name,
+                           -- mô tả: ưu tiên caption_text (có dấu), rơi về ocr_text, cuối cùng là sku_texts.text
+                           COALESCE(sc.caption_text, si.ocr_text, st.text, '') AS description,
+                           -- ảnh đại diện: ưu tiên ảnh đi kèm caption, rơi về ảnh đầu tiên
+                           COALESCE(sc.image_path, si.image_path, '') AS rep_image_path
+                    FROM skus sk
+                    LEFT JOIN brands b ON b.id = sk.brand_id
+                    LEFT JOIN LATERAL (
+                        SELECT caption_text, image_path
+                        FROM sku_captions
+                        WHERE sku_id = sk.id AND lang='vi' AND style='search'
+                        ORDER BY id ASC
                         LIMIT 1
-                    """, (result["image_path"], sku_id), fetch="one")
+                    ) sc ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT image_path, ocr_text
+                        FROM sku_images
+                        WHERE sku_id = sk.id
+                        ORDER BY (ocr_text IS NULL) ASC, id ASC
+                        LIMIT 1
+                    ) si ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT text
+                        FROM sku_texts
+                        WHERE sku_id = sk.id
+                        ORDER BY id ASC
+                        LIMIT 1
+                    ) st ON TRUE
+                    WHERE sk.id = ANY(%s)
+                """, (sku_ids,), fetch="all") or []
 
-                    sku_name, brand_name, ocr_text = sku_info if sku_info else (None, None, None)
+                info = {
+                    int(r[0]): {
+                        "sku_name": r[1],
+                        "brand_name": r[2],
+                        "description": r[3],
+                        "rep_image_path": r[4],
+                    } for r in enrich_rows
+                }
+
+                out = []
+                for idx, r in enumerate(results, start=1):
+                    sku_id   = int(r["sku_id"])
+                    rank     = int(r.get("rank", idx))  # phòng khi FAISS không gán rank
+                    score    = float(r.get("score", 0.0))
+                    img_id   = int(r.get("img_id", 0))
+                    img_path = r.get("image_path")
+
+                    meta = info.get(sku_id, {})
+                    sku_name   = meta.get("sku_name")
+                    brand_name = meta.get("brand_name")
+                    description = meta.get("description")  # ưu tiên caption_text
+
+                    # nếu còn trống, thử lấy OCR đúng ảnh này
+                    if not description:
+                        ocr_row = _q("""
+                            SELECT ocr_text FROM sku_images
+                            WHERE sku_id=%s AND image_path=%s
+                            LIMIT 1
+                        """, (sku_id, img_path), fetch="one")
+                        if ocr_row and ocr_row[0]:
+                            description = ocr_row[0]
 
                     cand_feats = {
                         "similarity": float(score),
                         "rank": int(rank),
                         "source": "image",
-                        "has_ocr": bool(ocr_text),
+                        "has_ocr": bool(description),
                         "brand_guess": brand_name,
                     }
 
-                    _q(
-                        "INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features) "
-                        "VALUES(%s,%s,%s,%s,%s)",
-                        (qid, sku_id, rank, float(score), pg_extras.Json(cand_feats)), fetch=None
-                    )
+                    # ghi candidate
+                    try:
+                        _q("""INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features)
+                              VALUES(%s,%s,%s,%s,%s)""",
+                           (qid, sku_id, rank, score, pg_extras.Json(cand_feats)), fetch=None)
+                    except Exception:
+                        pass
 
-                    result["sku_id"] = int(sku_id)
-                    result["img_id"] = int(result["img_id"])
-
+                    # chuẩn hoá field cho Android (snake_case + camelCase)
                     out.append({
-                        **result,
+                        # FAISS
+                        "sku_id": sku_id,
+                        "img_id": img_id,
+                        "image_path": img_path,
+                        "score": score,
+
+                        # enrich
                         "sku_name": sku_name,
                         "brand_name": brand_name,
-                        "ocr_text": ocr_text,
+                        "text": description,
+                        "description": description,
+                        "ocr_text": description,   # để UI có thể rơi về ocr nếu cần
+
+                        # camelCase mirrors
+                        "skuId": sku_id,
+                        "imagePath": img_path,
+                        "skuName": sku_name,
+                        "brandName": brand_name,
+                        "descriptionText": description,
+
                         "candidate_features": cand_feats
                     })
-                    
-                # === LẤY POPULARITY CHO CẢ SLATE MỘT LẦN ===
-                # === LẤY POPULARITY CHO CẢ SLATE MỘT LẦN (sau khi đã build 'out') ===
-                sku_ids = [it["sku_id"] for it in out]
-                pop_rows = _q("""
-                    SELECT sku_id, COALESCE(clicks_30d,0)::int, COALESCE(views_30d,0)::int, COALESCE(ctr_30d,0.0)
-                    FROM sku_popularity_30d
-                    WHERE sku_id = ANY(%s)
-                """, (sku_ids,), fetch="all") or []
 
-                pop_map = {r[0]: {"pop_clicks_30d": int(r[1]),
-                                  "pop_views_30d":  int(r[2]),
-                                  "pop_ctr_30d":    float(r[3])} for r in pop_rows}
+                # ========= POPULARITY (batch) =========
+                try:
+                    sku_ids = [it["sku_id"] for it in out]
+                    pop_rows = _q("""
+                        SELECT sku_id, COALESCE(clicks_30d,0)::int, COALESCE(views_30d,0)::int, COALESCE(ctr_30d,0.0)
+                        FROM sku_popularity_30d
+                        WHERE sku_id = ANY(%s)
+                    """, (sku_ids,), fetch="all") or []
+                    pop_map = {r[0]: {"pop_clicks_30d": int(r[1]),
+                                      "pop_views_30d":  int(r[2]),
+                                      "pop_ctr_30d":    float(r[3])} for r in pop_rows}
+                    for it in out:
+                        it["candidate_features"].update(pop_map.get(it["sku_id"], {
+                            "pop_clicks_30d": 0, "pop_views_30d": 0, "pop_ctr_30d": 0.0
+                        }))
+                except Exception:
+                    pass
 
-                for it in out:
-                    it["candidate_features"].update(pop_map.get(it["sku_id"], {
-                        "pop_clicks_30d": 0, "pop_views_30d": 0, "pop_ctr_30d": 0.0
-                    }))
-
-                # RE-RANK để hiển thị + có thể áp dụng
+                # ========= RE-RANK (model + prior) =========
                 try:
                     try:
                         _RE_RANKER.reload_if_needed()
@@ -477,22 +738,21 @@ def search_image():
                         except Exception:
                             pass
 
-                    # PRIOR từ popularity (giống bản trước)
                     import math
                     def _prior_from_pop(p):
-                        ctr = float(p.get("pop_ctr_30d", 0.0) or 0.0)           # [0..1]
+                        ctr = float(p.get("pop_ctr_30d", 0.0) or 0.0)
                         clk = float(p.get("pop_clicks_30d", 0.0) or 0.0)
-                        clk_norm = min(1.0, math.log1p(clk) / math.log(101.0))  # [0..1]
+                        clk_norm = min(1.0, math.log1p(clk) / math.log(101.0))
                         return 0.5 * ctr + 0.5 * clk_norm
 
-                    def _s_model_norm(s):
+                    def _model_norm(s):
                         return 0.5 * (math.tanh(float(s)) + 1.0)
 
                     PRIOR_W = float(os.getenv("RE_RANKER_PRIOR_WEIGHT", "0.5"))
                     PRIOR_W = max(0.0, min(PRIOR_W, 1.0))
                     MODEL_W = 1.0 - PRIOR_W
 
-                    # (tùy chọn) auto-boost nếu prior chênh lệch quá lớn
+                    # (tuỳ chọn) auto-boost nếu prior top vượt trội
                     priors = [_prior_from_pop(it["candidate_features"]) for it in out]
                     if priors:
                         sp = sorted(priors, reverse=True)
@@ -503,28 +763,28 @@ def search_image():
                     for it in out:
                         p = it["candidate_features"]
                         prior = _prior_from_pop(p)
-                        base  = _s_model_norm(it.get("re_rank_score", it.get("score", 0.0)))
+                        base  = _model_norm(it.get("re_rank_score", it.get("score", 0.0)))
                         it["combined_score"] = MODEL_W * base + PRIOR_W * prior
 
-                    reranked = sorted(out, key=lambda x: x.get("combined_score", x.get("re_rank_score", x.get("score", 0.0))), reverse=True)
+                    # sắp xếp theo combined → re_rank_score → score
+                    out = sorted(out, key=lambda x: x.get("combined_score", x.get("re_rank_score", x.get("score", 0.0))), reverse=True)
                 except Exception:
-                    reranked = []
+                    pass
 
-                # Áp dụng theo cờ/canary
+                # ========= ÁP DỤNG THEO CỜ =========
                 try:
                     apply_rerank, applied_reason = _should_apply_rerank(request)
                 except Exception:
                     apply_rerank, applied_reason = (True, 'default')
 
-                results_to_return = reranked if apply_rerank and reranked else out
+                results_to_return = out if apply_rerank else sorted(out, key=lambda x: x.get("score", 0.0), reverse=True)
 
                 return jsonify({
                     "query_id": qid,
                     "filename": secure_filename(file.filename),
                     "total": len(out),
                     "results": results_to_return,
-                    "reranked_results": reranked,
-                    "applied_re_rank": bool(apply_rerank and bool(reranked)),
+                    "applied_re_rank": bool(apply_rerank),
                     "applied_reason": applied_reason
                 })
 
@@ -537,7 +797,6 @@ def search_image():
     except Exception as e:
         current_app.logger.exception("Image search error")
         return jsonify({"error": str(e), "results": []}), 500
-
     
 def embed_text(text):
     try:

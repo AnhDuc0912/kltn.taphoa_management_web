@@ -258,45 +258,49 @@ def search_similar_skus():
         sql = """
             WITH combined_results AS (
                 SELECT 
-                    s.id AS sku_id,
-                    s.name AS sku_name,
-                    b.name AS brand_name,
-                    sc.image_path,
-                    sc.caption_text AS text,
+                    sc.sku_id, 
+                    sc.image_path, 
+                    sc.caption_text AS text, 
+                    sc.keywords, 
+                    sc.colors, 
+                    sc.materials,
+                    sc.brand_guess, 
+                    sc.size_guess, 
+                    sc.category_guess,
                     1 - (sc.caption_vec <=> %s::vector) AS similarity,
                     'caption' AS source
                 FROM sku_captions sc
-                JOIN skus s ON s.id = sc.sku_id
-                LEFT JOIN brands b ON b.id = s.brand_id
-                WHERE sc.lang = 'vi'
+                WHERE sc.lang = 'vi' 
                   AND sc.style = 'search'
                   AND sc.caption_vec IS NOT NULL
                   AND 1 - (sc.caption_vec <=> %s::vector) > %s
-                  AND to_tsvector('simple', unaccent(sc.caption_text)) @@ plainto_tsquery('simple', unaccent(%s))
+                  AND to_tsvector('simple', unaccent(sc.caption_text || ' ' || array_to_string(sc.keywords, ' '))) 
+                        @@ plainto_tsquery('simple', unaccent(%s))
 
                 UNION ALL
 
                 SELECT 
-                    s.id AS sku_id,
-                    s.name AS sku_name,
-                    b.name AS brand_name,
-                    COALESCE(sc.image_path, '') AS image_path,
-                    st.text AS text,
+                    st.sku_id, 
+                    NULL AS image_path, 
+                    st.text AS text, 
+                    ARRAY[]::text[] AS keywords, 
+                    ARRAY[]::text[] AS colors, 
+                    ARRAY[]::text[] AS materials,
+                    NULL AS brand_guess, 
+                    NULL AS size_guess, 
+                    NULL AS category_guess,
                     1 - (st.text_vec <=> %s::vector) AS similarity,
                     'text' AS source
                 FROM sku_texts st
-                JOIN skus s ON s.id = st.sku_id
-                LEFT JOIN brands b ON b.id = s.brand_id
-                LEFT JOIN sku_captions sc ON sc.sku_id = s.id
                 WHERE st.text_vec IS NOT NULL
                   AND 1 - (st.text_vec <=> %s::vector) > %s
-                  AND to_tsvector('simple', unaccent(st.text)) @@ plainto_tsquery('simple', unaccent(%s))
+                  AND to_tsvector('simple', unaccent(st.text)) 
+                        @@ plainto_tsquery('simple', unaccent(%s))
             )
             SELECT * FROM combined_results
             ORDER BY similarity DESC
             LIMIT %s
         """
-
         params = (
             query_vec_lit, query_vec_lit, threshold, query,
             query_vec_lit, query_vec_lit, threshold, query,
@@ -376,24 +380,16 @@ def search_similar_skus():
 def search_image():
     try:
         if 'file' not in request.files:
-            return jsonify({"error": "No file uploaded", "results": []}), 400
+            return jsonify({"error": "No file uploaded", "results": []})
 
         file = request.files['file']
-        if not file or file.filename.strip() == '':
-            return jsonify({"error": "No file selected", "results": []}), 400
+        k = min(int(request.form.get('k', 20)), 100)
 
-        # k: 1..100 (mặc định 20)
-        try:
-            k = int(request.form.get('k', 20))
-            k = max(1, min(k, 100))
-        except Exception:
-            k = 20
-
-        t0 = time.time()
+        if file.filename == '':
+            return jsonify({"error": "No file selected", "results": []})
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
             file.save(tmp.name)
-            tmp_path = tmp.name
 
             try:
                 from build_faiss_index import search_image_with_faiss
@@ -522,13 +518,6 @@ def search_image():
 
                 results_to_return = reranked if apply_rerank and reranked else out
 
-            # Tạo query id
-            qid_row = _q("INSERT INTO queries(type) VALUES('image') RETURNING id", fetch="one")
-            qid = int(qid_row[0]) if qid_row else None
-
-            # Gom sku_id để enrich 1 lần
-            sku_ids = [int(r.get("sku_id")) for r in results if r.get("sku_id") is not None]
-            if not sku_ids:
                 return jsonify({
                     "query_id": qid,
                     "filename": secure_filename(file.filename),

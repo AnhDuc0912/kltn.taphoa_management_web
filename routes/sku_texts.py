@@ -10,7 +10,7 @@ def sku_texts_page(sku_id):
     sku = q("SELECT id,name FROM skus WHERE id=%s", (sku_id,), fetch="one")
     if not sku:
         flash("KhÃ´ng tÃ¬m tháº¥y SKU","danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
     rows = q("SELECT id, text FROM sku_texts WHERE sku_id=%s ORDER BY id", (sku_id,))
     return render_template("sku_texts.html", sku=sku, rows=rows)
 

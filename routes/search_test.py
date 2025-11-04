@@ -72,8 +72,7 @@ def search_test_page():
 
 @bp.get("/search")
 def search_page():
-    return render_template("search.html")
-
+    
 @bp.post("/search/text")
 def search_text():
     data = request.get_json(silent=True) or {}
@@ -385,9 +384,7 @@ def search_text_with_image():
 def search_similar_skus():
     query = request.args.get("q", "").strip()
     page = max(int(request.args.get("page", 1) or 1), 1)
-    # cho phép override page_size qua query ?page_size=...
-    page_size = int(request.args.get("page_size", 5) or 5)
-    page_size = max(1, min(page_size, 50))  # chặn lạm dụng
+    page_size = max(1, min(int(request.args.get("page_size", 5) or 5), 50))
     threshold = float(request.args.get("threshold", 0.3))
 
     if not query:
@@ -399,7 +396,6 @@ def search_similar_skus():
         if not query_vec_lit:
             return jsonify({"error": "Embedding failed", "results": []}), 500
 
-        # ---- CTE base: ứng viên thô (chưa gộp SKU) ----
         base_sql = """
             WITH base AS (
                 SELECT 
@@ -442,118 +438,69 @@ def search_similar_skus():
                   AND to_tsvector('simple', unaccent(st.text)) 
                         @@ plainto_tsquery('simple', unaccent(%s))
             ),
-
-            -- GỘP THEO SKU: lấy dòng tốt nhất cho mỗi sku (ưu tiên caption rồi similarity)
             collapsed AS (
                 SELECT DISTINCT ON (sku_id)
                     sku_id, image_path, text, keywords, colors, materials,
                     brand_guess, size_guess, category_guess, similarity, source
                 FROM base
-                ORDER BY sku_id,                -- DISTINCT ON yêu cầu cột này đứng đầu ORDER BY
-                         similarity DESC,
-                         CASE WHEN source='caption' THEN 1 ELSE 0 END DESC
+                ORDER BY sku_id, similarity DESC, CASE WHEN source='caption' THEN 1 ELSE 0 END DESC
             ),
-
             ordered AS (
                 SELECT *
                 FROM collapsed
                 ORDER BY similarity DESC, sku_id DESC
             )
         """
-
         base_params = (
             query_vec_lit, query_vec_lit, threshold, query,
             query_vec_lit, query_vec_lit, threshold, query,
         )
 
-        # ---- Đếm tổng sau khi gộp SKU ----
-        count_sql = base_sql + " SELECT COUNT(*) FROM ordered; "
-        total = _q(count_sql, base_params, fetch="one")[0]   # ✅ fetch tuple -> lấy [0]
+        total = int(_q(base_sql + " SELECT COUNT(*) FROM ordered; ", base_params, fetch="one")[0])
 
-        # ---- Lấy trang hiện tại ----
         offset = (page - 1) * page_size
-        page_sql = base_sql + " SELECT * FROM ordered OFFSET %s LIMIT %s; "
-        page_params = base_params + (offset, page_size)
+        rows = _q(base_sql + " SELECT * FROM ordered OFFSET %s LIMIT %s; ",
+                  base_params + (offset, page_size), fetch="all")
 
-        rows = _q(page_sql, page_params, fetch="all")
-
-        # ---- Log query ----
         qid = _q(
             "INSERT INTO queries(type, raw_text, normalized_text) VALUES('text', %s, %s) RETURNING id",
             (query, vn_norm(query)), fetch="one"
         )[0]
 
-        out = []
+        # map rows -> raw_items
+        raw_items = []
         for idx, r in enumerate(rows, start=1):
-            # rows là tuple theo thứ tự trong SELECT của collapsed/ordered
-            feats = {
-                "similarity": float(r[9]),
-                "rank": int(offset + idx),
-                "source": r[10],
-                "keywords_count": int(len(r[3]) if r[3] else 0),
-            }
-            try:
-                _q(
-                    "INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features) "
-                    "VALUES(%s,%s,%s,%s,%s)",
-                    (qid, int(r[0]), feats["rank"], float(r[9]), pg_extras.Json(feats)), fetch=None
-                )
-            except Exception:
-                pass
-
-            out.append({
+            raw_items.append({
                 "sku_id": int(r[0]),
                 "image_path": r[1],
-                "text": r[2],
-                "keywords": r[3],
-                "colors": r[4],
-                "materials": r[5],
-                "brand_guess": r[6],
-                "size_guess": r[7],
-                "category_guess": r[8],
-                "similarity": float(r[9]),
+                "base_text": r[2],
+                "score": float(r[9]),
+                "rank": int(offset + idx),
                 "source": r[10],
-                "candidate_features": feats
+                "candidate_features": {
+                    "keywords_count": int(len(r[3]) if r[3] else 0)
+                }
             })
 
-        # ---- RE-RANK trong trang (tuỳ chọn) ----
-        reranked = out
-        try:
-            try:
-                _RE_RANKER.reload_if_needed()
-            except Exception:
-                pass
-            feat_list = [x.get("candidate_features") for x in out]
-            rerank_scores = _RE_RANKER.score_candidates(feat_list) or []
-            for item, rs in zip(out, rerank_scores):
-                item["re_rank_score"] = float(rs)
-                try:
-                    _q("UPDATE query_candidates SET re_rank_score=%s WHERE query_id=%s AND sku_id=%s",
-                       (float(rs), qid, item["sku_id"]), fetch=None)
-                except Exception:
-                    pass
-            reranked = sorted(
-                out,
-                key=lambda x: x.get("re_rank_score", x.get("similarity", 0.0)),
-                reverse=True
-            )
-        except Exception:
-            pass
+        enrich_map = _enrich_skus([x["sku_id"] for x in raw_items])
+        items = _build_output_items(raw_items, enrich_map, qid, query_type="text")
+        _attach_popularity(items)
+        items = _rerank_and_sort(items, qid, prior_weight_env_key="RE_RANKER_PRIOR_WEIGHT")
 
         total_pages = (total + page_size - 1) // page_size
         return jsonify({
-            "query": query,
+            "query_id": qid,
+            "query_text": query,
             "paging": {
                 "page": page,
                 "page_size": page_size,
-                "total": total,                # tổng sau khi gộp SKU
+                "total": total,
                 "total_pages": total_pages,
                 "has_next": page < total_pages,
                 "sql_offset": offset,
                 "sql_limit": page_size
             },
-            "results": out,
-            "reranked_results": reranked
+            "results": items
         }), 200
 
     except Exception as e:
@@ -593,197 +540,48 @@ def search_image():
                 # ========= GHI QUERY =========
                 qid = _q("INSERT INTO queries(type) VALUES('image') RETURNING id", fetch="one")[0]
 
-                # ========= JOIN THÔNG TIN MÔ TẢ/TÊN/BRAND =========
-                sku_ids = [int(r["sku_id"]) for r in results if "sku_id" in r]
-
-                enrich_rows = _q("""
-                    SELECT sk.id AS sku_id,
-                           sk.name AS sku_name,
-                           COALESCE(b.name, '') AS brand_name,
-                           -- mô tả: ưu tiên caption_text (có dấu), rơi về ocr_text, cuối cùng là sku_texts.text
-                           COALESCE(sc.caption_text, si.ocr_text, st.text, '') AS description,
-                           -- ảnh đại diện: ưu tiên ảnh đi kèm caption, rơi về ảnh đầu tiên
-                           COALESCE(sc.image_path, si.image_path, '') AS rep_image_path
-                    FROM skus sk
-                    LEFT JOIN brands b ON b.id = sk.brand_id
-                    LEFT JOIN LATERAL (
-                        SELECT caption_text, image_path
-                        FROM sku_captions
-                        WHERE sku_id = sk.id AND lang='vi' AND style='search'
-                        ORDER BY id ASC
-                        LIMIT 1
-                    ) sc ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT image_path, ocr_text
-                        FROM sku_images
-                        WHERE sku_id = sk.id
-                        ORDER BY (ocr_text IS NULL) ASC, id ASC
-                        LIMIT 1
-                    ) si ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT text
-                        FROM sku_texts
-                        WHERE sku_id = sk.id
-                        ORDER BY id ASC
-                        LIMIT 1
-                    ) st ON TRUE
-                    WHERE sk.id = ANY(%s)
-                """, (sku_ids,), fetch="all") or []
-
-                info = {
-                    int(r[0]): {
-                        "sku_name": r[1],
-                        "brand_name": r[2],
-                        "description": r[3],
-                        "rep_image_path": r[4],
-                    } for r in enrich_rows
-                }
-
-                out = []
+                # map FAISS -> raw_items
+                raw_items = []
                 for idx, r in enumerate(results, start=1):
                     sku_id   = int(r["sku_id"])
-                    rank     = int(r.get("rank", idx))  # phòng khi FAISS không gán rank
+                    rank     = int(r.get("rank", idx))
                     score    = float(r.get("score", 0.0))
-                    img_id   = int(r.get("img_id", 0))
                     img_path = r.get("image_path")
 
-                    meta = info.get(sku_id, {})
-                    sku_name   = meta.get("sku_name")
-                    brand_name = meta.get("brand_name")
-                    description = meta.get("description")  # ưu tiên caption_text
+                    # Nếu muốn rơi về OCR đúng ảnh khi enrich không có mô tả:
+                    base_txt = _ocr_for_image(sku_id, img_path) or None
 
-                    # nếu còn trống, thử lấy OCR đúng ảnh này
-                    if not description:
-                        ocr_row = _q("""
-                            SELECT ocr_text FROM sku_images
-                            WHERE sku_id=%s AND image_path=%s
-                            LIMIT 1
-                        """, (sku_id, img_path), fetch="one")
-                        if ocr_row and ocr_row[0]:
-                            description = ocr_row[0]
-
-                    cand_feats = {
-                        "similarity": float(score),
-                        "rank": int(rank),
-                        "source": "image",
-                        "has_ocr": bool(description),
-                        "brand_guess": brand_name,
-                    }
-
-                    # ghi candidate
-                    try:
-                        _q("""INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features)
-                              VALUES(%s,%s,%s,%s,%s)""",
-                           (qid, sku_id, rank, score, pg_extras.Json(cand_feats)), fetch=None)
-                    except Exception:
-                        pass
-
-                    # chuẩn hoá field cho Android (snake_case + camelCase)
-                    out.append({
-                        # FAISS
+                    raw_items.append({
                         "sku_id": sku_id,
-                        "img_id": img_id,
                         "image_path": img_path,
+                        "base_text": base_txt,     # có thể None, _build_output_items sẽ fallback
                         "score": score,
-
-                        # enrich
-                        "sku_name": sku_name,
-                        "brand_name": brand_name,
-                        "text": description,
-                        "description": description,
-                        "ocr_text": description,   # để UI có thể rơi về ocr nếu cần
-
-                        # camelCase mirrors
-                        "skuId": sku_id,
-                        "imagePath": img_path,
-                        "skuName": sku_name,
-                        "brandName": brand_name,
-                        "descriptionText": description,
-
-                        "candidate_features": cand_feats
+                        "rank": rank,
+                        "source": "image",
+                        "candidate_features": {
+                            "has_ocr": bool(base_txt)
+                        }
                     })
 
-                # ========= POPULARITY (batch) =========
-                try:
-                    sku_ids = [it["sku_id"] for it in out]
-                    pop_rows = _q("""
-                        SELECT sku_id, COALESCE(clicks_30d,0)::int, COALESCE(views_30d,0)::int, COALESCE(ctr_30d,0.0)
-                        FROM sku_popularity_30d
-                        WHERE sku_id = ANY(%s)
-                    """, (sku_ids,), fetch="all") or []
-                    pop_map = {r[0]: {"pop_clicks_30d": int(r[1]),
-                                      "pop_views_30d":  int(r[2]),
-                                      "pop_ctr_30d":    float(r[3])} for r in pop_rows}
-                    for it in out:
-                        it["candidate_features"].update(pop_map.get(it["sku_id"], {
-                            "pop_clicks_30d": 0, "pop_views_30d": 0, "pop_ctr_30d": 0.0
-                        }))
-                except Exception:
-                    pass
+                # ===== HẬU XỬ LÝ CHUNG =====
+                enrich_map = _enrich_skus([x["sku_id"] for x in raw_items])
+                items = _build_output_items(raw_items, enrich_map, qid, query_type="image")
+                _attach_popularity(items)
+                items = _rerank_and_sort(items, qid, prior_weight_env_key="RE_RANKER_PRIOR_WEIGHT")
 
-                # ========= RE-RANK (model + prior) =========
-                try:
-                    try:
-                        _RE_RANKER.reload_if_needed()
-                    except Exception:
-                        pass
-
-                    feat_list = [x.get("candidate_features") for x in out]
-                    rerank_scores = _RE_RANKER.score_candidates(feat_list) or []
-                    for it, rs in zip(out, rerank_scores):
-                        it["re_rank_score"] = float(rs)
-                        try:
-                            _q("UPDATE query_candidates SET re_rank_score=%s WHERE query_id=%s AND sku_id=%s",
-                               (float(rs), qid, it["sku_id"]), fetch=None)
-                        except Exception:
-                            pass
-
-                    import math
-                    def _prior_from_pop(p):
-                        ctr = float(p.get("pop_ctr_30d", 0.0) or 0.0)
-                        clk = float(p.get("pop_clicks_30d", 0.0) or 0.0)
-                        clk_norm = min(1.0, math.log1p(clk) / math.log(101.0))
-                        return 0.5 * ctr + 0.5 * clk_norm
-
-                    def _model_norm(s):
-                        return 0.5 * (math.tanh(float(s)) + 1.0)
-
-                    PRIOR_W = float(os.getenv("RE_RANKER_PRIOR_WEIGHT", "0.5"))
-                    PRIOR_W = max(0.0, min(PRIOR_W, 1.0))
-                    MODEL_W = 1.0 - PRIOR_W
-
-                    # (tuỳ chọn) auto-boost nếu prior top vượt trội
-                    priors = [_prior_from_pop(it["candidate_features"]) for it in out]
-                    if priors:
-                        sp = sorted(priors, reverse=True)
-                        if (sp[0] - (sp[1] if len(sp) > 1 else 0.0)) > 0.25:
-                            PRIOR_W = min(0.8, max(PRIOR_W, 0.6))
-                            MODEL_W = 1.0 - PRIOR_W
-
-                    for it in out:
-                        p = it["candidate_features"]
-                        prior = _prior_from_pop(p)
-                        base  = _model_norm(it.get("re_rank_score", it.get("score", 0.0)))
-                        it["combined_score"] = MODEL_W * base + PRIOR_W * prior
-
-                    # sắp xếp theo combined → re_rank_score → score
-                    out = sorted(out, key=lambda x: x.get("combined_score", x.get("re_rank_score", x.get("score", 0.0))), reverse=True)
-                except Exception:
-                    pass
-
-                # ========= ÁP DỤNG THEO CỜ =========
+                # ===== APPLY FLAG (giữ nguyên logic của bạn) =====
                 try:
                     apply_rerank, applied_reason = _should_apply_rerank(request)
                 except Exception:
                     apply_rerank, applied_reason = (True, 'default')
 
-                results_to_return = out if apply_rerank else sorted(out, key=lambda x: x.get("score", 0.0), reverse=True)
+                items_to_return = items if apply_rerank else sorted(items, key=lambda x: x.get("score", 0.0), reverse=True)
 
                 return jsonify({
                     "query_id": qid,
                     "filename": secure_filename(file.filename),
-                    "total": len(out),
-                    "results": results_to_return,
+                    "total": len(items),
+                    "results": items_to_return,
                     "applied_re_rank": bool(apply_rerank),
                     "applied_reason": applied_reason
                 })
@@ -815,6 +613,188 @@ def _l2norm(v):
     n = math.sqrt(sum(float(x)*float(x) for x in v)) or 1.0
     return [float(x)/n for x in v]
 
+# ====== SHARED HELPERS (enrich + popularity + rerank + build json) ======
+
+def _enrich_skus(sku_ids):
+    """Trả về map {sku_id: {sku_name, brand_name, description, image_path}} giống search_text_with_image."""
+    if not sku_ids:
+        return {}
+    rows = _q("""
+        SELECT sk.id AS sku_id,
+               sk.name AS sku_name,
+               COALESCE(b.name, '') AS brand_name,
+               COALESCE(sc.caption_text, si.ocr_text, st.text, '') AS description,
+               COALESCE(sc.image_path, si.image_path, '') AS image_path
+        FROM skus sk
+        LEFT JOIN brands b ON b.id = sk.brand_id
+        LEFT JOIN LATERAL (
+            SELECT caption_text, image_path
+            FROM sku_captions
+            WHERE sku_id = sk.id AND lang='vi' AND style='search'
+            ORDER BY id ASC LIMIT 1
+        ) sc ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT image_path, ocr_text
+            FROM sku_images
+            WHERE sku_id = sk.id
+            ORDER BY (ocr_text IS NULL) ASC, id ASC
+            LIMIT 1
+        ) si ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT text
+            FROM sku_texts
+            WHERE sku_id = sk.id
+            ORDER BY id ASC LIMIT 1
+        ) st ON TRUE
+        WHERE sk.id = ANY(%s)
+    """, (list(set(sku_ids)),), fetch="all") or []
+    return {
+        int(r[0]): {
+            "sku_name": r[1],
+            "brand_name": r[2],
+            "description": r[3],
+            "image_path": r[4],
+        } for r in rows
+    }
+
+def _attach_popularity(items):
+    """Gắn chỉ số popularity toàn cục (pop_*) vào candidate_features (nếu có bảng)."""
+    try:
+        sku_ids = [it["sku_id"] for it in items] or []
+        if not sku_ids:
+            return
+        rows = _q("""
+            SELECT sku_id, COALESCE(clicks_30d,0)::int, COALESCE(views_30d,0)::int, COALESCE(ctr_30d,0.0)
+            FROM sku_popularity_30d
+            WHERE sku_id = ANY(%s)
+        """, (sku_ids,), fetch="all") or []
+        pop = {r[0]: {"pop_clicks_30d": int(r[1]),
+                      "pop_views_30d":  int(r[2]),
+                      "pop_ctr_30d":    float(r[3])} for r in rows}
+        for it in items:
+            it.setdefault("candidate_features", {})
+            it["candidate_features"].update(pop.get(it["sku_id"], {
+                "pop_clicks_30d": 0, "pop_views_30d": 0, "pop_ctr_30d": 0.0
+            }))
+    except Exception:
+        pass
+
+def _rerank_and_sort(items, qid, prior_weight_env_key="RE_RANKER_PRIOR_WEIGHT"):
+    """Chạy re-ranker + prior (popularity) và sort; trả về list đã sắp xếp."""
+    try:
+        try:
+            _RE_RANKER.reload_if_needed()
+        except Exception:
+            pass
+
+        feat_list = [x.get("candidate_features") for x in items]
+        rerank_scores = _RE_RANKER.score_candidates(feat_list) or []
+        for it, rs in zip(items, rerank_scores):
+            it["re_rank_score"] = float(rs)
+            try:
+                _q("UPDATE query_candidates SET re_rank_score=%s WHERE query_id=%s AND sku_id=%s",
+                   (float(rs), qid, it["sku_id"]), fetch=None)
+            except Exception:
+                pass
+
+        import math
+        def _prior_from_pop(p):
+            ctr = float((p or {}).get("pop_ctr_30d", 0.0) or 0.0)
+            clk = float((p or {}).get("pop_clicks_30d", 0.0) or 0.0)
+            clk_norm = min(1.0, math.log1p(clk) / math.log(101.0))
+            return 0.5 * ctr + 0.5 * clk_norm
+
+        def _model_norm(s):
+            return 0.5 * (math.tanh(float(s)) + 1.0)
+
+        PRIOR_W = float(os.getenv(prior_weight_env_key, "0.5"))
+        PRIOR_W = max(0.0, min(PRIOR_W, 1.0))
+        MODEL_W = 1.0 - PRIOR_W
+
+        priors = [_prior_from_pop(it.get("candidate_features", {})) for it in items]
+        if priors:
+            sp = sorted(priors, reverse=True)
+            if (sp[0] - (sp[1] if len(sp) > 1 else 0.0)) > 0.25:
+                PRIOR_W = min(0.8, max(PRIOR_W, 0.6))
+                MODEL_W = 1.0 - PRIOR_W
+
+        for it in items:
+            prior = _prior_from_pop(it.get("candidate_features", {}))
+            base  = _model_norm(it.get("re_rank_score", it.get("score", 0.0)))
+            it["combined_score"] = MODEL_W * base + PRIOR_W * prior
+
+        items.sort(key=lambda x: x.get("combined_score", x.get("re_rank_score", x.get("score", 0.0))), reverse=True)
+    except Exception:
+        pass
+    return items
+
+def _build_output_items(raw_items, enrich_map, qid, query_type="text"):
+    """
+    raw_items: list dict gồm tối thiểu:
+      - sku_id (int), score (float), rank (int),
+      - optional: source (str), image_path (str), base_text (str), candidate_features (dict)
+    Trả về list item chuẩn hóa field giống search_text_with_image (snake_case + camelCase) và ghi query_candidates.
+    """
+    out = []
+    for it in raw_items:
+        sku_id   = int(it["sku_id"])
+        score    = float(it.get("score", 0.0))
+        rank     = int(it.get("rank", 0))
+        source   = it.get("source", query_type)
+        img_src  = it.get("image_path")
+        base_txt = it.get("base_text")
+
+        meta = enrich_map.get(sku_id, {})
+        description = meta.get("description") or (base_txt or "")
+        image_path  = meta.get("image_path") or img_src
+
+        feats = dict(it.get("candidate_features", {}))
+        feats.update({
+            "similarity": score,
+            "rank": rank,
+            "source": source,
+        })
+
+        # ghi candidate
+        try:
+            _q("""INSERT INTO query_candidates(query_id, sku_id, rank, score, candidate_features)
+                  VALUES(%s,%s,%s,%s,%s)""",
+               (qid, sku_id, rank, score, pg_extras.Json(feats)), fetch=None)
+        except Exception:
+            pass
+
+        out.append({
+            "sku_id": sku_id,
+            "sku_text_id": None,
+            "description": description,
+            "score": score,
+            "dist": 1.0 - score,
+            "sku_name": meta.get("sku_name"),
+            "brand_name": meta.get("brand_name"),
+            "image_path": image_path,
+
+            # camelCase
+            "skuId": sku_id,
+            "skuTextId": None,
+            "skuName": meta.get("sku_name"),
+            "brandName": meta.get("brand_name"),
+            "imagePath": image_path,
+            "descriptionText": description,
+
+            # giữ thêm
+            "source": source,
+            "candidate_features": feats
+        })
+    return out
+
+def _ocr_for_image(sku_id, img_path):
+    """Lấy OCR đúng ảnh; dùng khi muốn rơi về OCR nếu enrich không có mô tả."""
+    try:
+        row = _q("SELECT ocr_text FROM sku_images WHERE sku_id=%s AND image_path=%s LIMIT 1",
+                 (sku_id, img_path), fetch="one")
+        return (row and row[0]) or None
+    except Exception:
+        return None
 
 def _should_apply_rerank(req=None):
     """Decide whether to apply re-ranker ordering for a given request.

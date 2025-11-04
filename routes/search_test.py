@@ -72,7 +72,8 @@ def search_test_page():
 
 @bp.get("/search")
 def search_page():
-    
+    return render_template("search.html")
+
 @bp.post("/search/text")
 def search_text():
     data = request.get_json(silent=True) or {}

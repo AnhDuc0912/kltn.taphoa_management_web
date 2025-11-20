@@ -6,95 +6,195 @@ from utils import vn_norm
 
 bp = Blueprint("api_skus_bp", __name__)
 
-@bp.get("/skus", endpoint="skus")
-def skus():
-    brand_id = request.args.get("brand_id")
-    cat_id   = request.args.get("category_id")
-    qtext    = (request.args.get("q") or "").strip()
-
-    # Lấy cover + mô tả (description) mới nhất từ sku_search_corpus
-    sql = """
-    SELECT 
-        s.id, s.name, s.variant, s.size_text,
-        b.name AS brand, 
-        c.name AS cat, 
-        s.barcode, 
-        s.is_active,
-        (SELECT image_path FROM sku_images WHERE sku_id = s.id AND is_primary IS TRUE LIMIT 1) AS cover,
-        -- mô tả: lấy text_content mới nhất nếu có updated_at, fallback theo id
-        COALESCE(
-            (
-                SELECT corpus.text_content
-                FROM sku_search_corpus corpus
-                WHERE corpus.sku_id = s.id
-                ORDER BY corpus.updated_at DESC NULLS LAST, corpus.id DESC
-                LIMIT 1
-            ), ''
-        ) AS description
-    FROM skus s
-    LEFT JOIN brands b ON b.id = s.brand_id
-    LEFT JOIN categories c ON c.id = s.category_id
-    WHERE 1=1
+@bp.get("/cart/summary")
+def cart_summary():
     """
-    params = []
-    if brand_id:
-        sql += " AND s.brand_id = %s"
-        params.append(brand_id)
-    if cat_id:
-        sql += " AND s.category_id = %s"
-        params.append(cat_id)
-    if qtext:
-        sql += " AND EXISTS (SELECT 1 FROM sku_texts st WHERE st.sku_id = s.id AND st.text ILIKE %s)"
-        params.append(f"%{vn_norm(qtext)}%")
-        sql += """
-        AND EXISTS (
-            SELECT 1 FROM sku_search_corpus c2
-            WHERE c2.sku_id = s.id
-              AND (
-                    c2.search_vector @@ plainto_tsquery('simple', %s)
-                 OR c2.text_content ILIKE %s
-              )
-        )
-        """
-        params.extend([vn_norm(qtext), f"%{vn_norm(qtext)}%"])
+    Tóm tắt giỏ hàng để hiển thị:
+    - Input (query):
+        ids=1,2,3             # bắt buộc
+        qty=2,1,5              # tùy chọn, khớp thứ tự với ids
+    - Output:
+        {
+          "items": [
+            {
+              "sku_id": 1,
+              "sku_name": "...",
+              "brand_name": "...",
+              "image_path": "path/to.jpg",
+              "image_url": "http://<host>/media/path/to.jpg",
+              "description": "...",
+              "price": 15000.0,
+              "qty": 2,
+              "line_total": 30000.0
+            },
+            ...
+          ],
+          "subtotal": 123000.0,
+          "count_distinct": 3
+        }
+    """
+    from urllib.parse import urljoin
 
-    sql += " ORDER BY s.updated_at DESC NULLS LAST, s.id DESC"
+    def _abs_url(path: str) -> str | None:
+        if not path:
+            return None
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return urljoin(request.host_url, f"media/{path.lstrip('/')}")  # cần route /media/<path> đã cấu hình
 
-    rows   = q(sql, params)
-    brands = q("SELECT id, name FROM brands ORDER BY name")
-    cats   = q("SELECT id, name FROM categories ORDER BY name")
+    ids_raw = (request.args.get("ids") or "").strip()
+    qty_raw = (request.args.get("qty") or "").strip()
 
-    # Chuẩn hoá schema cho Home/Cart:
-    # { skuId, brandName, productName, productPrice, productSimilarity, imagePath, description }
-    view_rows = []
-    for r in rows:
-        sku_id     = r[0]
-        name       = (r[1] or "").strip()
-        variant    = (r[2] or "").strip()
-        size_text  = (r[3] or "").strip()
-        brand_name = (r[4] or "").strip()
-        cover      = (r[8] or "").strip()
-        desc       = (r[9] or "").strip()
+    if not ids_raw:
+        return jsonify({"error": "ids is required, e.g. ids=12,34"}), 400
 
-        parts = [name]
-        if variant:   parts.append(variant)
-        if size_text: parts.append(size_text)
-        product_name = " ".join(p for p in parts if p)
+    # Parse ids & qty
+    try:
+        sku_ids_in_order = [int(x) for x in ids_raw.split(",") if x.strip() != ""]
+    except Exception:
+        return jsonify({"error": "ids must be comma-separated integers"}), 400
 
-        view_rows.append({
-            "skuId": sku_id,
-            "brandName": brand_name,      # giữ để tương thích ngược
-            "productName": product_name,
-            "productPrice": None,         # chưa join bảng giá
-            "productSimilarity": None,    # không phải kết quả search ảnh
-            "imagePath": cover,
-            "description": desc           # <-- UI Home/Cart dùng trường này để hiển thị
-        })
+    if not sku_ids_in_order:
+        return jsonify({"error": "no valid sku_id provided"}), 400
 
-    return render_template("skus.html",
-                           rows=view_rows,            # giờ rows có 'description'
-                           brands=brands, cats=cats,
-                           sel_brand=brand_id, sel_cat=cat_id, qtext=qtext,
-                           captions_map={}, facets_map={}, colors_map={},
-                           has_refresh_corpus=True, has_sku_texts=True)
+    qty_list = []
+    if qty_raw:
+        try:
+            qty_list = [int(x) for x in qty_raw.split(",")]
+        except Exception:
+            qty_list = []
+    # Chuẩn hóa độ dài qty = len(ids), mặc định 1 nếu thiếu
+    if len(qty_list) != len(sku_ids_in_order):
+        qty_list = [1] * len(sku_ids_in_order)
+    # Số lượng tối thiểu 1
+    qty_list = [max(1, int(q)) for q in qty_list]
+
+    try:
+        # Enrich 1 lần cho tất cả sku_id
+        rows = _q("""
+            SELECT
+                sk.id AS sku_id,                          -- 0
+                sk.name AS sku_name,                      -- 1
+                COALESCE(b.name, '') AS brand_name,       -- 2
+                -- Giá: lấy mới nhất từ sku_prices, rơi về sk.price nếu null
+                COALESCE(sp.price, sk.price, 0)::float AS price, -- 3
+
+                -- Ảnh & mô tả đại diện
+                COALESCE(sc.image_path, si.image_path, '') AS rep_image_path,  -- 4
+                COALESCE(sc.caption_text, si.ocr_text, st.text, '') AS description -- 5
+            FROM skus sk
+            LEFT JOIN brands b ON b.id = sk.brand_id
+
+            -- Lấy giá mới nhất (nếu có)
+            LEFT JOIN LATERAL (
+                SELECT price
+                FROM sku_prices
+                WHERE sku_id = sk.id
+                ORDER BY updated_at DESC NULLS LAST, id DESC
+                LIMIT 1
+            ) sp ON TRUE
+
+            -- Lấy caption + ảnh đại diện
+            LEFT JOIN LATERAL (
+                SELECT caption_text, image_path
+                FROM sku_captions
+                WHERE sku_id = sk.id AND lang='vi' AND style='search'
+                ORDER BY id ASC
+                LIMIT 1
+            ) sc ON TRUE
+
+            -- Lấy ảnh/ocr fallback
+            LEFT JOIN LATERAL (
+                SELECT image_path, ocr_text
+                FROM sku_images
+                WHERE sku_id = sk.id
+                ORDER BY (ocr_text IS NULL) ASC, id ASC
+                LIMIT 1
+            ) si ON TRUE
+
+            -- Lấy text fallback
+            LEFT JOIN LATERAL (
+                SELECT text
+                FROM sku_texts
+                WHERE sku_id = sk.id
+                ORDER BY id ASC
+                LIMIT 1
+            ) st ON TRUE
+
+            WHERE sk.id = ANY(%s)
+        """, (sku_ids_in_order,), fetch="all") or []
+
+        # Map theo sku_id để giữ thứ tự đầu vào & qty tương ứng
+        info = {
+            int(r[0]): {
+                "sku_name": r[1],
+                "brand_name": r[2],
+                "price": float(r[3] or 0.0),
+                "image_path": r[4],
+                "description": r[5],
+            } for r in rows
+        }
+
+        items = []
+        subtotal = 0.0
+
+        for sku_id, qty in zip(sku_ids_in_order, qty_list):
+            meta = info.get(int(sku_id))
+            if not meta:
+                # SKU không tồn tại → vẫn trả placeholder để UI hiển thị được
+                item = {
+                    "sku_id": int(sku_id),
+                    "sku_name": None,
+                    "brand_name": None,
+                    "image_path": None,
+                    "image_url": None,
+                    "description": None,
+                    "price": 0.0,
+                    "qty": int(qty),
+                    "line_total": 0.0,
+                }
+                items.append(item)
+                continue
+
+            price = float(meta["price"])
+            line_total = float(price * qty)
+            subtotal += line_total
+
+            image_path = meta.get("image_path")
+            image_url = _abs_url(image_path)
+
+            item = {
+                "sku_id": int(sku_id),
+                "sku_name": meta.get("sku_name"),
+                "brand_name": meta.get("brand_name"),
+                "image_path": image_path,
+                "image_url": image_url,
+                "description": meta.get("description"),
+                "price": price,
+                "qty": int(qty),
+                "line_total": line_total,
+
+                # mirrors cho Android
+                "skuId": int(sku_id),
+                "skuName": meta.get("sku_name"),
+                "brandName": meta.get("brand_name"),
+                "imagePath": image_path,
+                "imageUrl": image_url,
+                "descriptionText": meta.get("description"),
+                "unitPrice": price,
+                "quantity": int(qty),
+                "lineTotal": line_total,
+            }
+            items.append(item)
+
+        resp = {
+            "items": items,
+            "subtotal": float(subtotal),
+            "count_distinct": len(items)
+        }
+        return jsonify(resp), 200
+
+    except Exception as e:
+        current_app.logger.exception("Cart summary error")
+        return jsonify({"error": str(e)}), 500
 

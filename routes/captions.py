@@ -132,7 +132,7 @@ def captions_autogen(sku_id):
     except Exception as e:
         current_app.logger.exception("Failed to import qwen2vl tool")
         flash("Không thể nạp module qwen autogen: " + str(e), "danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
     # Chỉ lấy ảnh của sku_id (không ràng buộc "chưa có caption" để cho phép refresh)
     rows = q("""
@@ -146,7 +146,7 @@ def captions_autogen(sku_id):
     if not rows:
         current_app.logger.info(f"No images found for sku_id {sku_id}")
         flash(f"Không tìm thấy ảnh nào cho SKU {sku_id}.", "warning")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
     done = fail = 0
     model_name = os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct").split("/")[-1]
@@ -281,7 +281,7 @@ def captions_autogen(sku_id):
 
     flash(f"Autogen xong cho SKU {sku_id}: thành công {done}, lỗi {fail}",
           "success" if fail == 0 else "warning")
-    return redirect(url_for("skus_bp.skus"))
+    return redirect(url_for("skus.skus"))
 
 # ==============================
 # SUGGEST CAPTION (write via API)
@@ -698,21 +698,21 @@ def caption_accept(caption_id: int):
     cap = _caption_exists(caption_id)
     if not cap:
         flash("Caption không tồn tại", "danger")
-        return redirect(request.referrer or url_for("skus_bp.skus"))
+        return redirect(request.referrer or url_for("skus.skus"))
     exec_sql("UPDATE sku_captions SET needs_review=FALSE, updated_at=NOW() WHERE id=%s", (caption_id,))
     try:
         exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
     except Exception:
         pass
     flash(f"Đã đánh dấu caption #{caption_id} là ACCEPTED", "success")
-    return redirect(request.referrer or url_for("skus_bp.skus"))
+    return redirect(request.referrer or url_for("skus.skus"))
 
 @bp.post("/admin/captions/<int:caption_id>/reject", endpoint="caption_reject")
 def caption_reject(caption_id: int):
     cap = _caption_exists(caption_id)
     if not cap:
         flash("Caption không tồn tại", "danger")
-        return redirect(request.referrer or url_for("skus_bp.skus"))
+        return redirect(request.referrer or url_for("skus.skus"))
     notes = (request.form.get("notes") or "").strip() or None
     exec_sql("""
         INSERT INTO caption_labels(caption_id, is_acceptable, corrected_text, notes, created_at)
@@ -721,7 +721,7 @@ def caption_reject(caption_id: int):
     """, (caption_id, notes, notes))
     exec_sql("UPDATE sku_captions SET needs_review=TRUE, updated_at=NOW() WHERE id=%s", (caption_id,))
     flash(f"Đã REJECT caption #{caption_id}", "warning")
-    return redirect(request.referrer or url_for("skus_bp.skus"))
+    return redirect(request.referrer or url_for("skus.skus"))
 
 @bp.post("/admin/captions/<int:caption_id>/ground", endpoint="caption_ground")
 def caption_ground(caption_id: int):
@@ -729,7 +729,7 @@ def caption_ground(caption_id: int):
             (caption_id,), fetch="one")
     if not cap:
         flash("Caption không tồn tại", "danger")
-        return redirect(request.referrer or url_for("skus_bp.skus"))
+        return redirect(request.referrer or url_for("skus.skus"))
 
     exec_sql("""
         UPDATE sku_captions
@@ -738,17 +738,17 @@ def caption_ground(caption_id: int):
          WHERE sku_id=%s AND image_path=%s AND style=%s
     """, (caption_id, cap.sku_id, cap.image_path, cap.style))
     flash(f"Đã đặt caption #{caption_id} là Ground Truth", "success")
-    return redirect(request.referrer or url_for("skus_bp.skus"))
+    return redirect(request.referrer or url_for("skus.skus"))
 
 @bp.post("/admin/captions/<int:caption_id>/delete", endpoint="caption_delete")
 def caption_delete(caption_id: int):
     cap = _caption_exists(caption_id)
     if not cap:
         flash("Caption không tồn tại", "danger")
-        return redirect(request.referrer or url_for("skus_bp.skus"))
+        return redirect(request.referrer or url_for("skus.skus"))
     exec_sql("DELETE FROM sku_captions WHERE id=%s", (caption_id,))
     flash(f"Đã xoá caption #{caption_id}", "secondary")
-    return redirect(request.referrer or url_for("skus_bp.skus"))
+    return redirect(request.referrer or url_for("skus.skus"))
 
 # ==============================
 # API: images pending (no search caption yet)

@@ -516,7 +516,7 @@ def search_image():
             return jsonify({"error": "No file uploaded", "results": []})
 
         file = request.files['file']
-        k = min(int(request.form.get('k', 20)), 100)
+        k = min(int(request.form.get('k', 50)), 100)
         try:
             threshold = float(request.form.get('threshold', 0.0))  # tuỳ chọn lọc theo score
         except Exception:

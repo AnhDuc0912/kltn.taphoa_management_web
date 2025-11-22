@@ -1,12 +1,12 @@
 {% extends "_base.html" %}
 {% block body %}
 <div class="d-flex align-items-center mb-3">
-  <h4 class="me-auto">Mô tả SKU #{{ sku[0] }} — {{ sku[1] }}</h4>
+  <h4 class="me-auto">Mô tả sản phẩm #{{ sku[0] }} — {{ sku[1] }}</h4>
 
   <!-- nút test caption Qwen trước (không dùng JS) -->
   <form method="post" action="{{ url_for('captions_bp.test_qwen_caption', sku_id=sku[0]) }}" class="me-2">
     <button type="submit" class="btn btn-info">
-      🧪 Test caption Qwen
+      🧪 Kiểm tra mô tả
     </button>
   </form>
 
@@ -15,7 +15,7 @@
         onsubmit="return confirm('Tạo caption + mô tả cho sản phẩm này?')"
         class="me-2">
     <input type="hidden" name="limit" value="1">
-    <button class="btn btn-warning">✳️ Tạo caption Qwen cho sản phẩm này</button>
+    <button class="btn btn-warning">✳️ Tạo mô tả cho sản phẩm này</button>
   </form>
 
   <a class="btn btn-light" href="{{ url_for('skus.skus') }}">← Quay lại danh sách</a>
@@ -26,7 +26,7 @@
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">🧪 Test Qwen Caption Generation</h5>
+        <h5 class="modal-title">🧪 Kiểm tra mô tả đã tạo</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
@@ -34,7 +34,7 @@
           <div class="spinner-border text-primary" role="status">
             <span class="visually-hidden">Đang tạo caption...</span>
           </div>
-          <div class="mt-2">Đang tạo caption với Qwen2-VL...</div>
+          <div class="mt-2">Đang tạo mô tả với Qwen2-VL...</div>
         </div>
         <div id="testCaptionResult" style="display:none;">
           <div class="row g-3">

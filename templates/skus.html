@@ -1,7 +1,7 @@
 {% extends "_base.html" %}
 {% block body %}
 <div class="d-flex align-items-center mb-3">
-  <h4 class="me-auto">SKUs</h4>
+  <h4 class="me-auto">Sản phẩm</h4>
   <div class="d-flex gap-2">
     <!-- Backfill text vectors button -->
     <form method="post" action="{{ url_for('admin_bp.text_vec_backfill') }}"
@@ -17,9 +17,7 @@
     </form>
     
     <!-- Admin stats button -->
-    <button class="btn btn-secondary" onclick="loadAdminStats()">📈 Thống kê</button>
-    
-    <a class="btn btn-primary" href="{{ url_for('skus.sku_new') }}">+ Thêm SKU</a>
+    <a class="btn btn-primary" href="{{ url_for('skus.sku_new') }}">+ Thêm sản phẩm</a>
   </div>
 </div>
 
@@ -28,16 +26,8 @@
 
 <form class="row g-2 mb-3">
   <div class="col-auto">
-    <select class="form-select" name="brand_id">
-      <option value="">-- Brand --</option>
-      {% for id,name in brands %}
-        <option value="{{ id }}" {{ 'selected' if sel_brand and sel_brand|int==id else '' }}>{{ name }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <div class="col-auto">
     <select class="form-select" name="category_id">
-      <option value="">-- Category --</option>
+      <option value="">-- Danh mục --</option>
       {% for id,name in cats %}
         <option value="{{ id }}" {{ 'selected' if sel_cat and sel_cat|int==id else '' }}>{{ name }}</option>
       {% endfor %}
@@ -45,7 +35,7 @@
   </div>
   <div class="col-auto">
     <input class="form-control" name="q" value="{{ qtext or '' }}"
-           placeholder="Tìm tên/brand/caption/OCR (BM25 + normalized)">
+           placeholder="Tìm tên/mô tả">
   </div>
   <div class="col-auto">
     <button class="btn btn-outline-secondary">Lọc</button>
@@ -78,10 +68,8 @@
     <tr>
       <th>Ảnh</th>
       <th>Thông tin</th>
-      <th>Brand/Cat</th>
-      <th>Size</th>
-      <th>Active</th>
-      <th class="text-end">Thao tác</th>
+      <th>Kích cỡ</th>
+      <th>Tồn tại</th>
     </tr>
   </thead>
   <tbody>

@@ -5,6 +5,7 @@ from services.db_utils import q, exec_sql
 from services.clip_service import embed_text_clip_512
 from utils import vn_norm
 from sentence_transformers import SentenceTransformer
+from build_faiss_index import build_faiss_index_from_db
 import logging
 import open_clip
 import torch
@@ -722,4 +723,13 @@ def admin_stats():
     except Exception as e:
         logger.exception("Failed to get admin stats")
         return jsonify({"error": str(e)}), 500
+
+
+@bp.post("/faiss/build")
+def build_faiss_index():
+    try:
+        build_faiss_index_from_db()
+        return redirect(url_for("skus.skus"))
+    except Exception as e:
+        return f"Lỗi khi xây dựng FAISS index: {e}", 500
 

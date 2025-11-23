@@ -32,7 +32,7 @@
       <div class="modal-body">
         <div id="testCaptionLoading" class="text-center py-4">
           <div class="spinner-border text-primary" role="status">
-            <span class="visually-hidden">Đang tạo caption...</span>
+            <span class="visually-hidden">Đang tạo mô tả...</span>
           </div>
           <div class="mt-2">Đang tạo mô tả với Qwen2-VL...</div>
         </div>
@@ -41,8 +41,8 @@
             <div class="col-md-6">
               <div class="card">
                 <div class="card-header py-2">
-                  <strong>🔍 Search Caption</strong>
-                  <small class="text-muted ms-2">(từ khoá giàu)</small>
+                  <strong>🔍 Mô tả cho tìm kiếm</strong>
+                  <small class="text-muted ms-2">(từ khoá phong phú)</small>
                 </div>
                 <div class="card-body">
                   <div id="searchCaption" class="border p-2 rounded bg-light"></div>
@@ -53,8 +53,8 @@
             <div class="col-md-6">
               <div class="card">
                 <div class="card-header py-2">
-                  <strong>📝 SEO Caption</strong>
-                  <small class="text-muted ms-2">(mô tả chi tiết)</small>
+                  <strong>📝 Mô tả chi tiết (SEO)</strong>
+                  <small class="text-muted ms-2">(phục vụ hiển thị sản phẩm)</small>
                 </div>
                 <div class="card-body">
                   <div id="seoCaption" class="border p-2 rounded bg-light"></div>
@@ -64,11 +64,11 @@
             </div>
           </div>
           <div class="mt-3">
-            <strong>ℹ️ Model Info:</strong>
+            <strong>ℹ️ Thông tin mô hình:</strong>
             <div id="modelInfo" class="text-muted small"></div>
           </div>
           <div class="mt-3">
-            <strong>🖼️ Image:</strong> <span id="imagePath" class="text-muted"></span>
+            <strong>🖼️ Ảnh:</strong> <span id="imagePath" class="text-muted"></span>
             <div id="ocrText" class="text-muted small mt-1"></div>
           </div>
         </div>
@@ -77,7 +77,7 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
         <button type="button" id="saveCaptionBtn" class="btn btn-success" style="display:none;" onclick="saveTestCaption()">
-          💾 Lưu caption này vào database
+          💾 Lưu mô tả này vào cơ sở dữ liệu
         </button>
       </div>
     </div>
@@ -105,7 +105,7 @@
           <div class="col-12">
             <button type="button" class="btn btn-sm btn-outline-secondary"
                     onclick="document.getElementById('normInput').value = {{ cap_latest|tojson }}">
-              Dán từ caption đã duyệt gần nhất
+              Dán từ mô tả đã duyệt gần nhất
             </button>
             <span class="text-muted small ms-2">“{{ cap_latest|truncate(80, True, '…') }}”</span>
           </div>
@@ -116,8 +116,8 @@
           <table class="table table-sm align-middle">
             <thead>
               <tr>
-                <th style="width:70px">ID</th>
-                <th>normalized_text</th>
+                <th style="width:70px">Mã</th>
+                <th>Chuỗi đã chuẩn hoá (normalized_text)</th>
                 <th class="text-end" style="width:260px">Thao tác</th>
               </tr>
             </thead>
@@ -154,7 +154,7 @@
   <div class="col-lg-5">
     <div class="card">
       <div class="card-header py-2">
-        <b>Gợi ý & Thông tin tham chiếu (optional)</b>
+        <b>Gợi ý & Thông tin tham chiếu (tuỳ chọn)</b>
       </div>
       <div class="card-body small">
         {% if cover_url %}
@@ -165,14 +165,14 @@
 
         {% if ocr_text %}
           <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">OCR</span>
+            <span class="badge bg-light text-dark me-1">OCR (nhận dạng ký tự)</span>
             <div class="text-muted">{{ ocr_text }}</div>
           </div>
         {% endif %}
 
         {% if caption_latest_text %}
           <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">Caption đã duyệt</span>
+            <span class="badge bg-light text-dark me-1">Mô tả đã duyệt</span>
             <div>{{ caption_latest_text }}</div>
           </div>
         {% endif %}
@@ -180,7 +180,7 @@
         {% set facets = sku_facets|default([]) %}
         {% if facets %}
           <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">Facets</span>
+            <span class="badge bg-light text-dark me-1">Thuộc tính</span>
             {% for f in facets %}
               <span class="badge bg-secondary-subtle border text-dark">{{ f }}</span>
             {% endfor %}
@@ -204,20 +204,20 @@
 
 <div class="card mt-3">
   <div class="card-header py-2 d-flex align-items-center">
-    <b class="me-auto">📄 Captions đã tạo (theo ảnh & style)</b>
+    <b class="me-auto">📄 Mô tả tự động đã tạo (theo ảnh & kiểu)</b>
     <form class="d-inline-block" method="get" action="{{ url_for('captions_bp.captions_by_sku', sku_id=sku[0]) }}">
       <div class="input-group input-group-sm" style="width: 360px;">
         <select name="style" class="form-select">
-          <option value="all">Tất cả style</option>
-          <option value="search">search</option>
-          <option value="seo">seo</option>
+          <option value="all">Tất cả kiểu</option>
+          <option value="search">Kiểu tìm kiếm (search)</option>
+          <option value="seo">Kiểu SEO (seo)</option>
         </select>
         <select name="needs_review" class="form-select">
           <option value="all">Tất cả trạng thái</option>
-          <option value="1">Needs review</option>
+          <option value="1">Cần duyệt</option>
           <option value="0">Đã duyệt</option>
         </select>
-        <button class="btn btn-outline-secondary">Lấy JSON</button>
+        <button class="btn btn-outline-secondary">Xem JSON</button>
       </div>
     </form>
   </div>
@@ -227,11 +227,11 @@
       <table class="table table-sm align-middle">
         <thead>
           <tr>
-            <th style="width:70px">ID</th>
+            <th style="width:70px">Mã</th>
             <th>Ảnh</th>
-            <th style="width:90px">Style</th>
-            <th>Caption</th>
-            <th style="width:170px">Model</th>
+            <th style="width:90px">Kiểu</th>
+            <th>Mô tả</th>
+            <th style="width:170px">Mô hình</th>
             <th style="width:120px">Trạng thái</th>
             <th class="text-end" style="width:280px">Thao tác</th>
           </tr>
@@ -251,9 +251,9 @@
                       <div class="small text-muted">{{ r.image_path }}</div>
                       {% if r.brand_guess or r.variant_guess or r.size_guess %}
                         <div class="small">
-                          {% if r.brand_guess %}<span class="badge bg-light text-dark">brand: {{ r.brand_guess }}</span>{% endif %}
-                          {% if r.variant_guess %}<span class="badge bg-light text-dark">variant: {{ r.variant_guess }}</span>{% endif %}
-                          {% if r.size_guess %}<span class="badge bg-light text-dark">size: {{ r.size_guess }}</span>{% endif %}
+                          {% if r.brand_guess %}<span class="badge bg-light text-dark">thương hiệu: {{ r.brand_guess }}</span>{% endif %}
+                          {% if r.variant_guess %}<span class="badge bg-light text-dark">phiên bản: {{ r.variant_guess }}</span>{% endif %}
+                          {% if r.size_guess %}<span class="badge bg-light text-dark">kích cỡ: {{ r.size_guess }}</span>{% endif %}
                         </div>
                       {% endif %}
                     </div>
@@ -261,17 +261,22 @@
                 </td>
                 <td>
                   <span class="badge {% if r.style=='search' %}bg-primary-subtle text-primary{% else %}bg-warning-subtle text-dark{% endif %}">
-                    {{ r.style }}
+                    {% if r.style == 'search' %}
+                      Tìm kiếm
+                    {% elif r.style == 'seo' %}
+                      SEO
+                    {% else %}
+                      {{ r.style }}
+                    {% endif %}
                   </span>
                 </td>
                 <td style="max-width: 560px">
                   <div>{{ r.caption_text }}</div>
                   <div class="small text-muted mt-1">
-                    {% set badges = [] %}
-                    {% if r.keywords and r.keywords|length %}<span class="badge bg-secondary-subtle border text-dark">kw: {{ r.keywords|length }}</span>{% endif %}
+                    {% if r.keywords and r.keywords|length %}<span class="badge bg-secondary-subtle border text-dark">từ khoá: {{ r.keywords|length }}</span>{% endif %}
                     {% if r.colors and r.colors|length %}<span class="badge bg-secondary-subtle border text-dark">màu: {{ r.colors|length }}</span>{% endif %}
                     {% if r.materials and r.materials|length %}<span class="badge bg-secondary-subtle border text-dark">chất liệu: {{ r.materials|length }}</span>{% endif %}
-                    {% if r.category_guess %}<span class="badge bg-light text-dark">cat: {{ r.category_guess }}</span>{% endif %}
+                    {% if r.category_guess %}<span class="badge bg-light text-dark">danh mục: {{ r.category_guess }}</span>{% endif %}
                     <span class="ms-2">({{ r.created_at }})</span>
                   </div>
                 </td>
@@ -280,29 +285,29 @@
                 </td>
                 <td>
                   {% if r.is_ground_truth %}
-                    <span class="badge bg-success">Ground Truth</span><br>
+                    <span class="badge bg-success">Nhãn chuẩn (Ground Truth)</span><br>
                   {% endif %}
                   {% if r.needs_review %}
-                    <span class="badge bg-danger-subtle text-danger">Needs review</span>
+                    <span class="badge bg-danger-subtle text-danger">Cần duyệt</span>
                   {% else %}
-                    <span class="badge bg-success-subtle text-success">OK</span>
+                    <span class="badge bg-success-subtle text-success">Đã ổn</span>
                   {% endif %}
                 </td>
                 <td class="text-end">
                   <div class="d-flex gap-1 justify-content-end">
                     <form method="post" action="{{ url_for('captions_bp.caption_accept', caption_id=r.id) }}">
-                      <button class="btn btn-sm btn-success">✔️ Accept</button>
+                      <button class="btn btn-sm btn-success">✔️ Duyệt</button>
                     </form>
                     <form method="post" action="{{ url_for('captions_bp.caption_reject', caption_id=r.id) }}"
-                          onsubmit="return confirm('Reject caption này?')">
+                          onsubmit="return confirm('Từ chối mô tả này?')">
                       <input type="hidden" name="notes" value="">
-                      <button class="btn btn-sm btn-outline-danger">❌ Reject</button>
+                      <button class="btn btn-sm btn-outline-danger">❌ Từ chối</button>
                     </form>
                     <form method="post" action="{{ url_for('captions_bp.caption_ground', caption_id=r.id) }}">
-                      <button class="btn btn-sm btn-outline-success">🌟 Ground</button>
+                      <button class="btn btn-sm btn-outline-success">🌟 Chọn làm nhãn chuẩn</button>
                     </form>
                     <form method="post" action="{{ url_for('captions_bp.caption_delete', caption_id=r.id) }}"
-                          onsubmit="return confirm('Xoá caption này?')">
+                          onsubmit="return confirm('Xoá mô tả này?')">
                       <button class="btn btn-sm btn-outline-secondary">🗑️ Xoá</button>
                     </form>
                   </div>
@@ -310,7 +315,7 @@
               </tr>
             {% endfor %}
           {% else %}
-            <tr><td colspan="7" class="text-center text-muted">Chưa có caption nào</td></tr>
+            <tr><td colspan="7" class="text-center text-muted">Chưa có mô tả nào</td></tr>
           {% endif %}
         </tbody>
       </table>

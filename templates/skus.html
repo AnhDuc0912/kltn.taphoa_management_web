@@ -70,6 +70,22 @@
         </div>
       </div>
     </div>
+      <div class="d-flex align-items-center mb-3">
+        <div class="d-flex gap-2 ms-auto">
+          <!-- Backfill image vectors button -->
+          <form method="post" action="{{ url_for('admin_bp.admin_backfill_images') }}"
+                onsubmit="return confirm('Tạo image vectors cho images chưa có vector?')">
+            <input type="hidden" name="limit" value="200">
+            <button class="btn btn-warning">🖼️ Backfill Image Vectors</button>
+          </form>
+
+          <!-- Rebuild FAISS index button -->
+          <form method="post" action="{{ url_for('admin_bp.build_faiss_index') }}"
+                onsubmit="return confirm('Xây dựng lại FAISS index từ database? Quá trình có thể lâu.')">
+            <button class="btn btn-dark">🔁 Rebuild FAISS Index</button>
+          </form>
+        </div>
+      </div>
   </div>
 </form>
 

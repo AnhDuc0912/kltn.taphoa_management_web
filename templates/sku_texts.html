@@ -4,7 +4,8 @@
   <h4 class="me-auto">Mô tả SKU #{{ sku[0] }} — {{ sku[1] }}</h4>
 
   <!-- nút test caption Qwen trước (không dùng JS) -->
-  <form method="post" action="{{ url_for('captions_bp.test_qwen_caption', sku_id=sku[0]) }}" class="me-2">
+  <form method="post" action="{{ url_for('captions_bp.test_qwen_caption', sku_id=sku[0]) }}"
+    class="me-2">
     <button type="submit" class="btn btn-info">
       🧪 Test caption Qwen
     </button>
@@ -12,8 +13,7 @@
 
   <!-- nút tạo caption Qwen cho từng sản phẩm -->
   <form method="post" action="{{ url_for('captions_bp.captions_autogen', sku_id=sku[0]) }}"
-        onsubmit="return confirm('Tạo caption + mô tả cho sản phẩm này?')"
-        class="me-2">
+    onsubmit="return confirm('Tạo caption + mô tả cho sản phẩm này?')" class="me-2">
     <input type="hidden" name="limit" value="1">
     <button class="btn btn-warning">✳️ Tạo caption Qwen cho sản phẩm này</button>
   </form>
@@ -76,7 +76,8 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
-        <button type="button" id="saveCaptionBtn" class="btn btn-success" style="display:none;" onclick="saveTestCaption()">
+        <button type="button" id="saveCaptionBtn" class="btn btn-success" style="display:none;"
+          onclick="saveTestCaption()">
           💾 Lưu caption này vào database
         </button>
       </div>
@@ -92,10 +93,11 @@
         <b>Thêm/Chỉnh mô tả chuẩn hoá (sku_texts)</b>
       </div>
       <div class="card-body">
-        <form class="row g-2 mb-2" method="post" action="{{ url_for('sku_texts_bp.sku_texts_add', sku_id=sku[0]) }}">
+        <form class="row g-2 mb-2" method="post"
+          action="{{ url_for('sku_texts_bp.sku_texts_add', sku_id=sku[0]) }}">
           <div class="col-9">
             <input id="normInput" class="form-control" name="text"
-                   placeholder="Nhập mô tả (sẽ tự chuẩn hoá vn_norm trước khi lưu)" required>
+              placeholder="Nhập mô tả (sẽ tự chuẩn hoá vn_norm trước khi lưu)" required>
           </div>
           <div class="col-auto">
             <button class="btn btn-primary">Thêm mô tả</button>
@@ -104,10 +106,11 @@
           {% if cap_latest %}
           <div class="col-12">
             <button type="button" class="btn btn-sm btn-outline-secondary"
-                    onclick="document.getElementById('normInput').value = {{ cap_latest|tojson }}">
+              onclick="document.getElementById('normInput').value = {{ cap_latest|tojson }}">
               Dán từ caption đã duyệt gần nhất
             </button>
-            <span class="text-muted small ms-2">“{{ cap_latest|truncate(80, True, '…') }}”</span>
+            <span
+              class="text-muted small ms-2">“{{ cap_latest|truncate(80, True, '…') }}”</span>
           </div>
           {% endif %}
         </form>
@@ -128,12 +131,14 @@
                 <td style="max-width: 680px">{{ text }}</td>
                 <td class="text-end">
                   <div class="d-flex gap-2 justify-content-end">
-                    <form class="d-flex gap-2" method="post" action="{{ url_for('sku_texts_bp.sku_texts_update', sku_id=sku[0], text_id=tid) }}">
+                    <form class="d-flex gap-2" method="post"
+                      action="{{ url_for('sku_texts_bp.sku_texts_update', sku_id=sku[0], text_id=tid) }}">
                       <input class="form-control form-control-sm" name="text" value="{{ text }}" style="max-width: 520px">
                       <button class="btn btn-sm btn-outline-primary">Lưu</button>
                     </form>
-                    <form method="post" action="{{ url_for('sku_texts_bp.sku_texts_delete', sku_id=sku[0], text_id=tid) }}"
-                          onsubmit="return confirm('Xoá mô tả này?')">
+                    <form method="post"
+                      action="{{ url_for('sku_texts_bp.sku_texts_delete', sku_id=sku[0], text_id=tid) }}"
+                      onsubmit="return confirm('Xoá mô tả này?')">
                       <button class="btn btn-sm btn-outline-danger">Xoá</button>
                     </form>
                   </div>
@@ -141,7 +146,9 @@
               </tr>
               {% endfor %}
               {% if rows|length == 0 %}
-              <tr><td colspan="3" class="text-center text-muted">Chưa có mô tả nào</td></tr>
+              <tr>
+                <td colspan="3" class="text-center text-muted">Chưa có mô tả nào</td>
+              </tr>
               {% endif %}
             </tbody>
           </table>
@@ -158,42 +165,42 @@
       </div>
       <div class="card-body small">
         {% if cover_url %}
-          <div class="mb-2">
-            <img src="{{ cover_url }}" style="max-height:160px;object-fit:cover;border-radius:8px">
-          </div>
+        <div class="mb-2">
+          <img src="{{ cover_url }}" style="max-height:160px;object-fit:cover;border-radius:8px">
+        </div>
         {% endif %}
 
         {% if ocr_text %}
-          <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">OCR</span>
-            <div class="text-muted">{{ ocr_text }}</div>
-          </div>
+        <div class="mb-2">
+          <span class="badge bg-light text-dark me-1">OCR</span>
+          <div class="text-muted">{{ ocr_text }}</div>
+        </div>
         {% endif %}
 
         {% if caption_latest_text %}
-          <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">Caption đã duyệt</span>
-            <div>{{ caption_latest_text }}</div>
-          </div>
+        <div class="mb-2">
+          <span class="badge bg-light text-dark me-1">Caption đã duyệt</span>
+          <div>{{ caption_latest_text }}</div>
+        </div>
         {% endif %}
 
         {% set facets = sku_facets|default([]) %}
         {% if facets %}
-          <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">Facets</span>
-            {% for f in facets %}
-              <span class="badge bg-secondary-subtle border text-dark">{{ f }}</span>
-            {% endfor %}
-          </div>
+        <div class="mb-2">
+          <span class="badge bg-light text-dark me-1">Facets</span>
+          {% for f in facets %}
+          <span class="badge bg-secondary-subtle border text-dark">{{ f }}</span>
+          {% endfor %}
+        </div>
         {% endif %}
 
         {% if colors %}
-          <div class="mb-2">
-            <span class="badge bg-light text-dark me-1">Màu</span>
-            {% for c in colors %}
-              <span class="badge" style="background:#eee;color:#333">{{ c }}</span>
-            {% endfor %}
-          </div>
+        <div class="mb-2">
+          <span class="badge bg-light text-dark me-1">Màu</span>
+          {% for c in colors %}
+          <span class="badge" style="background:#eee;color:#333">{{ c }}</span>
+          {% endfor %}
+        </div>
         {% endif %}
 
         <div class="text-muted">* Các khối trên sẽ tự ẩn nếu backend chưa truyền dữ liệu.</div>
@@ -203,10 +210,11 @@
 </div>
 
 <div class="card mt-3">
-    <div class="card-header py-2 d-flex align-items-center">
+  <div class="card-header py-2 d-flex align-items-center">
     <b class="me-auto">📄 Captions đã tạo (theo ảnh & style)</b>
     <div class="d-flex gap-2">
-      <form class="d-inline-block" method="get" action="{{ url_for('captions_bp.captions_by_sku', sku_id=sku[0]) }}">
+      <form class="d-inline-block" method="get"
+        action="{{ url_for('captions_bp.captions_by_sku', sku_id=sku[0]) }}">
         <div class="input-group input-group-sm" style="width: 360px;">
           <select name="style" class="form-select">
             <option value="all">Tất cả style</option>
@@ -221,7 +229,8 @@
           <button class="btn btn-outline-secondary">Lấy JSON</button>
         </div>
       </form>
-      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('api_captions_export', sku_id=sku[0]) }}">Export TSV</a>
+      <a class="btn btn-sm btn-outline-primary"
+        href="{{ url_for('api_captions_export', sku_id=sku[0]) }}">Export TSV</a>
     </div>
   </div>
 
@@ -232,87 +241,92 @@
           <tr>
             <th style="width:70px">ID</th>
             <th>Ảnh</th>
-            <th style="width:90px">Style</th>
             <th>Caption</th>
             <th style="width:120px">Trạng thái</th>
           </tr>
         </thead>
         <tbody>
           {% if rows_captions and rows_captions|length > 0 %}
-            {% for r in rows_captions %}
-              <tr>
-                <td class="text-muted">#{{ r.id }}</td>
-                <td>
-                  <div class="d-flex align-items-center gap-2">
-                    {% if r.image_path %}
-                      <img src="{{ (cover_url|default('') and cover_url) or url_for('static', filename=r.image_path) if False else ('/uploads/' ~ r.image_path) }}"
-                           style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #eee">
-                    {% endif %}
-                    <div>
-                      <div class="small text-muted">{{ r.image_path }}</div>
-                      {% if r.brand_guess or r.variant_guess or r.size_guess %}
-                        <div class="small">
-                          {% if r.brand_guess %}<span class="badge bg-light text-dark">brand: {{ r.brand_guess }}</span>{% endif %}
-                          {% if r.variant_guess %}<span class="badge bg-light text-dark">variant: {{ r.variant_guess }}</span>{% endif %}
-                          {% if r.size_guess %}<span class="badge bg-light text-dark">size: {{ r.size_guess }}</span>{% endif %}
-                        </div>
-                      {% endif %}
-                    </div>
+          {% for r in rows_captions %}
+          {% if r.style == 'search' %}
+          <tr>
+            <td class="text-muted">#{{ r.id }}</td>
+            <td>
+              <div class="d-flex align-items-center gap-2">
+                {% if r.image_path %}
+                <img
+                  src="{{ (cover_url|default('') and cover_url) or url_for('static', filename=r.image_path) if False else ('/uploads/' ~ r.image_path) }}"
+                  style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #eee">
+                {% endif %}
+                <div>
+                  <div class="small text-muted">{{ r.image_path }}</div>
+                  {% if r.brand_guess or r.variant_guess or r.size_guess %}
+                  <div class="small">
+                    {% if r.brand_guess %}<span class="badge bg-light text-dark">brand:
+                      {{ r.brand_guess }}</span>{% endif %}
+                    {% if r.variant_guess %}<span class="badge bg-light text-dark">variant:
+                      {{ r.variant_guess }}</span>{% endif %}
+                    {% if r.size_guess %}<span class="badge bg-light text-dark">size: {{ r.size_guess }}</span>{% endif %}
                   </div>
-                </td>
-                <td>
-                  <span class="badge {% if r.style=='search' %}bg-primary-subtle text-primary{% else %}bg-warning-subtle text-dark{% endif %}">
-                    {{ r.style }}
-                  </span>
-                </td>
-                <td style="max-width: 560px">
-                  <div>{{ r.caption_text }}</div>
-                  <div class="small text-muted mt-1">
-                    {% set badges = [] %}
-                    {% if r.keywords and r.keywords|length %}<span class="badge bg-secondary-subtle border text-dark">kw: {{ r.keywords|length }}</span>{% endif %}
-                    {% if r.colors and r.colors|length %}<span class="badge bg-secondary-subtle border text-dark">màu: {{ r.colors|length }}</span>{% endif %}
-                    {% if r.materials and r.materials|length %}<span class="badge bg-secondary-subtle border text-dark">chất liệu: {{ r.materials|length }}</span>{% endif %}
-                    {% if r.category_guess %}<span class="badge bg-light text-dark">cat: {{ r.category_guess }}</span>{% endif %}
-                    <span class="ms-2">({{ r.created_at }})</span>
-                  </div>
-                  <div class="small text-muted mt-1">
-                    {% if r.keywords and r.keywords|length %}
-                      <div><strong>Keywords:</strong> {{ r.keywords|join(', ') }}</div>
-                    {% endif %}
-                    {% if r.colors and r.colors|length %}
-                      <div><strong>Colors:</strong> {{ r.colors|join(', ') }}</div>
-                    {% endif %}
-                    {% if r.materials and r.materials|length %}
-                      <div><strong>Materials:</strong> {{ r.materials|join(', ') }}</div>
-                    {% endif %}
-                    {% if r.packaging %}<div><strong>Packaging:</strong> {{ r.packaging }}</div>{% endif %}
-                    {% if r.taste %}<div><strong>Taste:</strong> {{ r.taste }}</div>{% endif %}
-                    {% if r.texture %}<div><strong>Texture:</strong> {{ r.texture }}</div>{% endif %}
-                    {% if r.facet_scores %}<div><strong>Facet scores:</strong> {{ r.facet_scores }}</div>{% endif %}
-                    {% if r.brand_guess or r.variant_guess or r.size_guess %}
-                      <div><strong>Guesses:</strong>
-                        {% if r.brand_guess %} brand={{ r.brand_guess }}{% endif %}
-                        {% if r.variant_guess %} variant={{ r.variant_guess }}{% endif %}
-                        {% if r.size_guess %} size={{ r.size_guess }}{% endif %}
-                      </div>
-                    {% endif %}
-                  </div>
-                </td>
-            
-                <td>
-                  {% if r.is_ground_truth %}
-                    <span class="badge bg-success">Ground Truth</span><br>
                   {% endif %}
-                  {% if r.needs_review %}
-                    <span class="badge bg-danger-subtle text-danger">Needs review</span>
-                  {% else %}
-                    <span class="badge bg-success-subtle text-success">OK</span>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
+                </div>
+              </div>
+            </td>
+            <td style="max-width: 560px">
+              <div>{{ r.caption_text }}</div>
+              <div class="small text-muted mt-1">
+                {% set badges = [] %}
+                {% if r.keywords and r.keywords|length %}<span class="badge bg-secondary-subtle border text-dark">kw:
+                  {{ r.keywords|length }}</span>{% endif %}
+                {% if r.colors and r.colors|length %}<span class="badge bg-secondary-subtle border text-dark">màu:
+                  {{ r.colors|length }}</span>{% endif %}
+                {% if r.materials and r.materials|length %}<span class="badge bg-secondary-subtle border text-dark">chất
+                  liệu: {{ r.materials|length }}</span>{% endif %}
+                {% if r.category_guess %}<span class="badge bg-light text-dark">cat:
+                  {{ r.category_guess }}</span>{% endif %}
+                <span class="ms-2">({{ r.created_at }})</span>
+              </div>
+              <div class="small text-muted mt-1">
+                {% if r.keywords and r.keywords|length %}
+                <div><strong>Keywords:</strong> {{ r.keywords|join(', ') }}</div>
+                {% endif %}
+                {% if r.colors and r.colors|length %}
+                <div><strong>Colors:</strong> {{ r.colors|join(', ') }}</div>
+                {% endif %}
+                {% if r.materials and r.materials|length %}
+                <div><strong>Materials:</strong> {{ r.materials|join(', ') }}</div>
+                {% endif %}
+                {% if r.packaging %}<div><strong>Packaging:</strong> {{ r.packaging }}</div>{% endif %}
+                {% if r.taste %}<div><strong>Taste:</strong> {{ r.taste }}</div>{% endif %}
+                {% if r.texture %}<div><strong>Texture:</strong> {{ r.texture }}</div>{% endif %}
+                {% if r.facet_scores %}<div><strong>Facet scores:</strong> {{ r.facet_scores }}</div>{% endif %}
+                {% if r.brand_guess or r.variant_guess or r.size_guess %}
+                <div><strong>Guesses:</strong>
+                  {% if r.brand_guess %} brand={{ r.brand_guess }}{% endif %}
+                  {% if r.variant_guess %} variant={{ r.variant_guess }}{% endif %}
+                  {% if r.size_guess %} size={{ r.size_guess }}{% endif %}
+                </div>
+                {% endif %}
+              </div>
+            </td>
+
+            <td>
+              {% if r.is_ground_truth %}
+              <span class="badge bg-success">Ground Truth</span><br>
+              {% endif %}
+              {% if r.needs_review %}
+              <span class="badge bg-danger-subtle text-danger">Needs review</span>
+              {% else %}
+              <span class="badge bg-success-subtle text-success">OK</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
           {% else %}
-            <tr><td colspan="7" class="text-center text-muted">Chưa có caption nào</td></tr>
+          <tr>
+            <td colspan="7" class="text-center text-muted">Chưa có caption nào</td>
+          </tr>
           {% endif %}
         </tbody>
       </table>

@@ -1,6 +1,6 @@
 {% extends "_base.html" %}
 {% block body %}
-<h4>Ảnh SKU #{{sku[0]}} — {{sku[1]}}</h4>
+<h4>Ảnh sản phẩm #{{sku[0]}} — {{sku[1]}}</h4>
 <form class="row g-2 mb-3" method="post" enctype="multipart/form-data" action="{{ url_for('sku_image_add', sku_id=sku[0]) }}">
   <div class="col-auto"><input class="form-control" type="file" name="image" required></div>
   <div class="col-auto form-check">

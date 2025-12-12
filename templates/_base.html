@@ -12,14 +12,11 @@
 <body class="bg-light">
   <nav class="navbar navbar-expand-lg bg-white border-bottom mb-3">
     <div class="container">
-      <a class="navbar-brand" href="{{ url_for('dashboard_bp.dashboard') }}">Grocery Admin</a>
+      <a class="navbar-brand" href="{{ url_for('dashboard_bp.dashboard') }}">Hango</a>
 
       <div class="navbar-nav">
-        <a class="nav-link" href="{{ url_for('brands_bp.brands') }}">Brands</a>
-        <a class="nav-link" href="{{ url_for('categories_bp.categories') }}">Categories</a>
-        <a class="nav-link" href="{{ url_for('skus_bp.skus') }}">SKUs</a>
-        <a class="nav-link" href="{{ url_for('import_bp.import_csv_page') }}">Import CSV</a>
-        <a class="nav-link" href="{{ url_for('admin_bp.refresh_corpus') }}">Export CSV</a>
+        <a class="nav-link" href="{{ url_for('skus.skus') }}">Sản phẩm</a>
+        <a class="nav-link" href="{{ url_for('import_bp.import_csv_page') }}">Nhập CSV</a>
       </div>
     </div>
   </nav>

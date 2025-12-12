@@ -1,43 +1,39 @@
 {% extends "_base.html" %}
 {% block body %}
 <div class="d-flex align-items-center mb-3">
-  <h4 class="me-auto">SKUs</h4>
+  <h4 class="me-auto">Sản phẩm</h4>
   <div class="d-flex gap-2">
-    <!-- Backfill text vectors button -->
+    <!-- Backfill text vectors -->
     <form method="post" action="{{ url_for('admin_bp.text_vec_backfill') }}"
-          onsubmit="return confirm('Tạo vector embeddings cho texts chưa có vector?')">
+          onsubmit="return confirm('Tạo vector embeddings cho các text chưa có vector?')">
       <input type="hidden" name="limit" value="100">
-      <button class="btn btn-warning">📊 Backfill Text Vectors</button>
+      <button class="btn btn-warning">📊 Tạo vector văn bản</button>
     </form>
     
-    <!-- Refresh search corpus button -->
+    <!-- Refresh search corpus -->
     <form method="post" action="{{ url_for('admin_bp.refresh_search_corpus') }}"
-          onsubmit="return confirm('Refresh search corpus?');">
+          onsubmit="return confirm('Làm mới dữ liệu phục vụ tìm kiếm?');">
       <button class="btn btn-light">↻ Làm mới tìm kiếm</button>
     </form>
+
+    <!-- Build FAISS index -->
+    <form method="post" action="{{ url_for('admin_bp.build_faiss_index') }}"
+          onsubmit="return confirm('Xây dựng lại FAISS index cho ảnh sản phẩm?');">
+      <button class="btn btn-info">🧠 Tạo FAISS index ảnh</button>
+    </form>
     
-    <!-- Admin stats button -->
-    <button class="btn btn-secondary" onclick="loadAdminStats()">📈 Thống kê</button>
-    
-    <a class="btn btn-primary" href="{{ url_for('skus_bp.sku_new') }}">+ Thêm SKU</a>
+    <!-- Thêm sản phẩm -->
+    <a class="btn btn-primary" href="{{ url_for('skus.sku_new') }}">+ Thêm sản phẩm</a>
   </div>
 </div>
 
-<!-- Stats display area -->
+<!-- Khu vực hiển thị thống kê admin -->
 <div id="admin-stats" class="alert alert-info" style="display: none;"></div>
 
 <form class="row g-2 mb-3">
   <div class="col-auto">
-    <select class="form-select" name="brand_id">
-      <option value="">-- Brand --</option>
-      {% for id,name in brands %}
-        <option value="{{ id }}" {{ 'selected' if sel_brand and sel_brand|int==id else '' }}>{{ name }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <div class="col-auto">
     <select class="form-select" name="category_id">
-      <option value="">-- Category --</option>
+      <option value="">-- Danh mục --</option>
       {% for id,name in cats %}
         <option value="{{ id }}" {{ 'selected' if sel_cat and sel_cat|int==id else '' }}>{{ name }}</option>
       {% endfor %}
@@ -45,28 +41,36 @@
   </div>
   <div class="col-auto">
     <input class="form-control" name="q" value="{{ qtext or '' }}"
-           placeholder="Tìm tên/brand/caption/OCR (BM25 + normalized)">
+           placeholder="Tìm theo tên / mô tả">
   </div>
   <div class="col-auto">
     <button class="btn btn-outline-secondary">Lọc</button>
   </div>
 
-  <!-- Bộ lọc nâng cao (optional: facets) -->
+  <!-- Bộ lọc nâng cao (facets) -->
   <div class="col-12">
     <a class="small text-decoration-none" data-bs-toggle="collapse" href="#advFilter">Bộ lọc nâng cao</a>
     <div class="collapse mt-2" id="advFilter">
       <div class="row g-2">
         <div class="col-auto">
-          <input class="form-control" name="shape" value="{{ request.args.get('shape','') if request is defined else '' }}" placeholder="shape: triangle/round/...">
+          <input class="form-control" name="shape"
+                 value="{{ request.args.get('shape','') if request is defined else '' }}"
+                 placeholder="Hình dạng: triangle / round / ...">
         </div>
         <div class="col-auto">
-          <input class="form-control" name="packaging" value="{{ request.args.get('packaging','') if request is defined else '' }}" placeholder="packaging: transparent_bag/...">
+          <input class="form-control" name="packaging"
+                 value="{{ request.args.get('packaging','') if request is defined else '' }}"
+                 placeholder="Bao bì: transparent_bag / ...">
         </div>
         <div class="col-auto">
-          <input class="form-control" name="texture" value="{{ request.args.get('texture','') if request is defined else '' }}" placeholder="texture: crispy/...">
+          <input class="form-control" name="texture"
+                 value="{{ request.args.get('texture','') if request is defined else '' }}"
+                 placeholder="Kết cấu: crispy / ...">
         </div>
         <div class="col-auto">
-          <input class="form-control" name="color" value="{{ request.args.get('color','') if request is defined else '' }}" placeholder="color: yellow/golden/...">
+          <input class="form-control" name="color"
+                 value="{{ request.args.get('color','') if request is defined else '' }}"
+                 placeholder="Màu sắc: yellow / golden / ...">
         </div>
       </div>
     </div>
@@ -78,9 +82,9 @@
     <tr>
       <th>Ảnh</th>
       <th>Thông tin</th>
-      <th>Brand/Cat</th>
-      <th>Size</th>
-      <th>Active</th>
+      <th>Thương hiệu / Danh mục</th>
+      <th>Kích cỡ</th>
+      <th>Trạng thái</th>
       <th class="text-end">Thao tác</th>
     </tr>
   </thead>
@@ -104,10 +108,10 @@
         <td style="min-width: 320px">
           <b class="d-block">{{ name }}</b>
           {% if variant %}<div class="text-muted small">{{ variant }}</div>{% endif %}
-          {% if barcode %}<div class="text-muted small">Barcode: {{ barcode }}</div>{% endif %}
+          {% if barcode %}<div class="text-muted small">Mã vạch (barcode): {{ barcode }}</div>{% endif %}
           {% if cap %}
             <div class="small mt-1" title="{{ cap }}">
-              <span class="badge bg-light text-dark me-1">caption</span>
+              <span class="badge bg-light text-dark me-1">Mô tả (caption)</span>
               {{ cap|truncate(80, True, '…') }}
             </div>
           {% endif %}
@@ -133,10 +137,22 @@
         <td>{{ size_tx or '' }}</td>
         <td>{{ '✅' if is_active else '❌' }}</td>
         <td class="text-end d-flex gap-1 justify-content-end">
-          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('skus_bp.sku_edit', sku_id=id) }}" title="Sửa SKU">Sửa</a>
-          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('sku_images_bp.sku_images', sku_id=id) }}" title="Quản lý ảnh">Ảnh</a>
-          <a class="btn btn-sm btn-outline-dark" href="{{ url_for('sku_texts_bp.sku_texts_add', sku_id=id) }}" title="Mô tả chuẩn hoá">Mô tả</a>
-          <form class="d-inline" method="post" action="{{ url_for('skus_bp.sku_delete', sku_id=id) }}" onsubmit="return confirm('Xoá SKU?')">
+          <a class="btn btn-sm btn-outline-primary"
+             href="{{ url_for('skus.sku_edit', sku_id=id) }}" title="Sửa sản phẩm">
+             Sửa
+          </a>
+          <a class="btn btn-sm btn-outline-secondary"
+             href="{{ url_for('sku_images_bp.sku_images', sku_id=id) }}" title="Quản lý ảnh">
+             Ảnh
+          </a>
+          <a class="btn btn-sm btn-outline-dark"
+             href="{{ url_for('sku_texts_bp.sku_texts_add', sku_id=id) }}" title="Mô tả chuẩn hoá">
+             Mô tả
+          </a>
+          <form class="d-inline"
+                method="post"
+                action="{{ url_for('skus.sku_delete', sku_id=id) }}"
+                onsubmit="return confirm('Xoá sản phẩm này (SKU)?')">
             <button class="btn btn-sm btn-outline-danger">Xoá</button>
           </form>
         </td>
@@ -159,14 +175,17 @@ async function loadAdminStats() {
         if (response.ok) {
             statsDiv.innerHTML = `
                 <strong>📊 Thống kê hệ thống:</strong><br>
-                • Tổng SKUs: <span class="badge bg-primary">${stats.total_skus}</span> (Đang hoạt động: <span class="badge bg-success">${stats.active_skus}</span>)<br>
-                • Texts cần vector: <span class="badge bg-warning">${stats.texts_no_vector}</span><br>
-                • Images cần vector: <span class="badge bg-warning">${stats.images_no_vector}</span><br>
-                • Search corpus: ${stats.corpus_exists ? 
-                    `<span class="badge bg-info">${stats.corpus_entries} entries</span>` : 
+                • Tổng SKU: <span class="badge bg-primary">${stats.total_skus}</span>
+                  (Đang hoạt động: <span class="badge bg-success">${stats.active_skus}</span>)<br>
+                • Văn bản cần tạo vector: <span class="badge bg-warning">${stats.texts_no_vector}</span><br>
+                • Ảnh cần tạo vector: <span class="badge bg-warning">${stats.images_no_vector}</span><br>
+                • Tập dữ liệu tìm kiếm (search corpus): ${
+                    stats.corpus_exists ? 
+                    `<span class="badge bg-info">${stats.corpus_entries} dòng</span>` : 
                     '<span class="badge bg-danger">Chưa tạo</span>'
                 }
-                <button type="button" class="btn-close float-end" onclick="document.getElementById('admin-stats').style.display='none'"></button>
+                <button type="button" class="btn-close float-end"
+                        onclick="document.getElementById('admin-stats').style.display='none'"></button>
             `;
             statsDiv.className = 'alert alert-info';
         } else {

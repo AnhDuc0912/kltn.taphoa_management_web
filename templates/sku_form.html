@@ -1,19 +1,10 @@
 {% extends "_base.html" %}
 {% block body %}
-<h4>{{ 'Sửa SKU' if sku else 'Thêm SKU' }}</h4>
+<h4>{{ 'Sửa sản phẩm' if sku else 'Thêm SKU' }}</h4>
 <form method="post" action="{{ url_for('sku_update', sku_id=sku[0]) if sku else url_for('sku_create') }}">
   <div class="row g-3">
     <div class="col-md-4">
-      <label class="form-label">Brand</label>
-      <select class="form-select" name="brand_id">
-        <option value="">-- chọn --</option>
-        {% for id,name in brands %}
-        <option value="{{id}}" {{ 'selected' if sku and sku[1]==id else '' }}>{{name}}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="col-md-4">
-      <label class="form-label">Category</label>
+      <label class="form-label">Danh mục</label>
       <select class="form-select" name="category_id">
         <option value="">-- chọn --</option>
         {% for id,name in cats %}
@@ -21,25 +12,17 @@
         {% endfor %}
       </select>
     </div>
-    <div class="col-md-4">
-      <label class="form-label">Barcode</label>
-      <input class="form-control" name="barcode" value="{{ sku[6] if sku else '' }}">
-    </div>
     <div class="col-md-6">
       <label class="form-label">Tên sản phẩm</label>
       <input class="form-control" name="name" required value="{{ sku[3] if sku else '' }}">
     </div>
     <div class="col-md-3">
-      <label class="form-label">Variant</label>
-      <input class="form-control" name="variant" value="{{ sku[4] if sku else '' }}">
-    </div>
-    <div class="col-md-3">
-      <label class="form-label">Size</label>
+      <label class="form-label">Kích cỡ</label>
       <input class="form-control" name="size_text" value="{{ sku[5] if sku else '' }}">
     </div>
     <div class="col-md-3 form-check mt-4 ms-2">
       <input class="form-check-input" type="checkbox" name="is_active" value="1" {{ 'checked' if (not sku) or sku[7] else '' }}>
-      <label class="form-check-label">Active</label>
+      <label class="form-check-label">Tồn tại</label>
     </div>
   </div>
   <div class="mt-3">

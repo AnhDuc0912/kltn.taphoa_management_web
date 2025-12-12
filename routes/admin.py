@@ -5,6 +5,7 @@ from services.db_utils import q, exec_sql
 from services.clip_service import embed_text_clip_512
 from utils import vn_norm
 from sentence_transformers import SentenceTransformer
+from build_faiss_index import build_faiss_index_from_db
 import logging
 import open_clip
 import torch
@@ -61,7 +62,7 @@ def refresh_corpus():
         
 #         if not rows:
 #             flash("Không có text nào cần backfill vector", "info")
-#             return redirect(url_for("skus_bp.skus"))
+#             return redirect(url_for("skus.skus"))
 
 #         model, preprocess, tokenizer = get_clip_model()
 #         device = next(model.parameters()).device
@@ -121,12 +122,12 @@ def refresh_corpus():
 #         except Exception as e:
 #             logger.error("Failed to refresh corpus after CLIP backfill: %s", e)
             
-#         return redirect(url_for("skus_bp.skus"))
+#         return redirect(url_for("skus.skus"))
         
 #     except Exception as e:
 #         logger.exception("CLIP text vector backfill failed")
 #         flash(f"Lỗi backfill CLIP: {e}", "danger")
-#         return redirect(url_for("skus_bp.skus"))
+#         return redirect(url_for("skus.skus"))
 
 # @bp.post("/admin/image-vector-backfill-clip")
 # def image_vec_backfill_clip():
@@ -145,7 +146,7 @@ def refresh_corpus():
         
 #         if not rows:
 #             flash("Không có ảnh nào cần backfill vector", "info")
-#             return redirect(url_for("skus_bp.skus"))
+#             return redirect(url_for("skus.skus"))
 
 #         model, preprocess, tokenizer = get_clip_model()
 #         device = next(model.parameters()).device
@@ -197,12 +198,12 @@ def refresh_corpus():
 
 #         flash(f"CLIP image vector backfill: {processed} thành công, {failed} lỗi", "success" if failed == 0 else "warning")
         
-#         return redirect(url_for("skus_bp.skus"))
+#         return redirect(url_for("skus.skus"))
         
 #     except Exception as e:
 #         logger.exception("CLIP image vector backfill failed")
 #         flash(f"Lỗi backfill CLIP images: {e}", "danger")
-#         return redirect(url_for("skus_bp.skus"))
+#         return redirect(url_for("skus.skus"))
 
 @bp.post("/admin/text-vector-backfill")
 def text_vec_backfill():
@@ -220,7 +221,7 @@ def text_vec_backfill():
 
         if not rows:
             flash("Không có text nào cần backfill vector", "info")
-            return redirect(url_for("skus_bp.skus"))
+            return redirect(url_for("skus.skus"))
 
         model, preprocess, tokenizer = get_clip_model()
         device = next(model.parameters()).device
@@ -271,12 +272,12 @@ def text_vec_backfill():
         except Exception as e:
             logger.warning("Refresh corpus after backfill failed: %s", e)
 
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
     except Exception as e:
         logger.exception("CLIP text vector backfill failed")
         flash(f"Lỗi backfill CLIP: {e}", "danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 # ...existing code...
 @bp.post("/admin/refresh-corpus")
 def refresh_search_corpus():  # tên function khác
@@ -284,11 +285,11 @@ def refresh_search_corpus():  # tên function khác
     try:
         refresh_corpus_internal()
         flash("Đã refresh search corpus thành công", "success")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
     except Exception as e:
         logger.exception("Refresh corpus failed")
         flash(f"Lỗi refresh corpus: {e}", "danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
 def refresh_corpus_internal():
     """Internal function to refresh corpus (can be called from other functions)"""
@@ -401,7 +402,7 @@ def text_vec_backfill_clip():
         
         if not rows:
             flash("Không có text nào cần backfill vector", "info")
-            return redirect(url_for("skus_bp.skus"))
+            return redirect(url_for("skus.skus"))
 
         model, preprocess, tokenizer = get_clip_model()
         device = next(model.parameters()).device
@@ -461,12 +462,12 @@ def text_vec_backfill_clip():
         except Exception as e:
             logger.error("Failed to refresh corpus after CLIP backfill: %s", e)
             
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
         
     except Exception as e:
         logger.exception("CLIP text vector backfill failed")
         flash(f"Lỗi backfill CLIP: {e}", "danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
 @bp.post("/admin/image-vector-backfill-clip")
 def image_vec_backfill_clip():
@@ -485,7 +486,7 @@ def image_vec_backfill_clip():
         
         if not rows:
             flash("Không có ảnh nào cần backfill vector", "info")
-            return redirect(url_for("skus_bp.skus"))
+            return redirect(url_for("skus.skus"))
 
         model, preprocess, tokenizer = get_clip_model()
         device = next(model.parameters()).device
@@ -537,12 +538,12 @@ def image_vec_backfill_clip():
 
         flash(f"CLIP image vector backfill: {processed} thành công, {failed} lỗi", "success" if failed == 0 else "warning")
         
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
         
     except Exception as e:
         logger.exception("CLIP image vector backfill failed")
         flash(f"Lỗi backfill CLIP images: {e}", "danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
 @bp.post("/admin/text-vector-backfill")
 def text_vec_backfill_alt():
@@ -561,7 +562,7 @@ def text_vec_backfill_alt():
         
         if not rows:
             flash("Không có text nào cần backfill vector", "info")
-            return redirect(url_for("skus_bp.skus"))
+            return redirect(url_for("skus.skus"))
 
         model = get_embed_model()
         processed = 0
@@ -610,12 +611,12 @@ def text_vec_backfill_alt():
         except Exception as e:
             logger.error("Failed to refresh corpus after backfill: %s", e)
             
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
         
     except Exception as e:
         logger.exception("Text vector backfill failed")
         flash(f"Lỗi backfill: {e}", "danger")
-        return redirect(url_for("skus_bp.skus"))
+        return redirect(url_for("skus.skus"))
 
 # @bp.post("/admin/refresh-corpus")
 # def refresh_search_corpus():  # tên function khác
@@ -623,11 +624,11 @@ def text_vec_backfill_alt():
 #     try:
 #         refresh_corpus_internal()
 #         flash("Đã refresh search corpus thành công", "success")
-#         return redirect(url_for("skus_bp.skus"))
+#         return redirect(url_for("skus.skus"))
 #     except Exception as e:
 #         logger.exception("Refresh corpus failed")
 #         flash(f"Lỗi refresh corpus: {e}", "danger")
-#         return redirect(url_for("skus_bp.skus"))
+#         return redirect(url_for("skus.skus"))
 
 def refresh_corpus_internal():
     """Internal function to refresh corpus (can be called from other functions)"""
@@ -722,4 +723,13 @@ def admin_stats():
     except Exception as e:
         logger.exception("Failed to get admin stats")
         return jsonify({"error": str(e)}), 500
+
+
+@bp.post("/faiss/build")
+def build_faiss_index():
+    try:
+        build_faiss_index_from_db()
+        return redirect(url_for("skus.skus"))
+    except Exception as e:
+        return f"Lỗi khi xây dựng FAISS index: {e}", 500
 

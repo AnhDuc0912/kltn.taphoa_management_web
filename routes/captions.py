@@ -1,75 +1,162 @@
 ﻿# routes/captions.py
-import os, time
-import json  # ADD THIS LINE
+import os, time, json, traceback
+from pathlib import Path
 from flask import Blueprint, request, redirect, url_for, flash, current_app, jsonify
 from services.db_utils import q, exec_sql
 from services.moondream_service import md_chat_vision, _mime_from_path
-import traceback
-from pathlib import Path
 
 bp = Blueprint("captions_bp", __name__)
+
+# ==============================
+# Global config / constants
+# ==============================
 UPLOAD_DIR = os.path.abspath(os.getenv("UPLOAD_FOLDER", "uploads"))
-# Simple prompt used for caption generation
 PROMPT_SEARCH = "Viết caption ngắn 1-2 câu, khách quan, tiếng Việt."
 PROMPT_SEO = "Viết mô tả 3-5 câu bằng tiếng Việt cho trang sản phẩm, nhấn mạnh công dụng/đặc điểm."
 
+# ==============================
+# CUDA / PyTorch helpers
+# ==============================
+try:
+    import torch
+    _HAS_TORCH = True
+except Exception:
+    _HAS_TORCH = False
+    torch = None  # type: ignore
+
+def _torch_device() -> str:
+    """
+    Chọn device ưu tiên 'cuda' nếu có; cho phép ép/tắt bằng ENV:
+      - DISABLE_CUDA=1  -> luôn dùng CPU
+      - FORCE_CUDA=1    -> ưu tiên CUDA nếu is_available()
+    """
+    if not _HAS_TORCH:
+        return "cpu"
+    if os.getenv("DISABLE_CUDA", "").strip() == "1":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+def _log_cuda_env(logger):
+    """Log trạng thái CUDA/PyTorch để debug nhanh."""
+    try:
+        if not _HAS_TORCH:
+            logger.info("CUDA env: PyTorch not installed -> CPU")
+            return
+        dev = _torch_device()
+        info = {"device": dev, "torch": torch.__version__}
+        if dev == "cuda":
+            info.update({
+                "cuda_available": torch.cuda.is_available(),
+                "cuda_runtime": getattr(torch.version, "cuda", None),
+                "gpu_name": torch.cuda.get_device_name(0),
+                "gpu_count": torch.cuda.device_count(),
+            })
+        logger.info("CUDA env: %s", info)
+    except Exception as e:
+        logger.warning("Failed to log CUDA env: %s", e)
+
+@bp.get("/system/cuda_info")
+def cuda_info():
+    """Health-check: trả info CUDA/PyTorch + thử tạo tensor trên GPU."""
+    try:
+        dev = _torch_device()
+        out = {"device": dev, "pytorch": (torch.__version__ if _HAS_TORCH else None)}
+        if _HAS_TORCH and dev == "cuda":
+            out.update({
+                "cuda_available": torch.cuda.is_available(),
+                "cuda_runtime": getattr(torch.version, "cuda", None),
+                "gpu_name": torch.cuda.get_device_name(0),
+                "gpu_count": torch.cuda.device_count(),
+            })
+            x = torch.randn(128, 128, device="cuda")
+            out["tensor_cuda_ok"] = x.shape == (128, 128)
+        return {"ok": True, **out}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
+
+# ==============================
+# Small math helpers
+# ==============================
+def _vec_literal(vec):
+    return "[" + ",".join(f"{float(x):.6f}" for x in vec) + "]" if vec else None
+
+def _l2norm(v):
+    import math
+    n = math.sqrt(sum(float(x) * float(x) for x in v)) or 1.0
+    return [float(x) / n for x in v]
+
+# ==============================
+# Text embedding (GPU nếu có)
+# ==============================
+def embed_text(text: str):
+    """
+    Trả embedding vector cho text.
+    Ưu tiên utils.encode_texts(..., device=...), fallback SentenceTransformer (GPU), cuối cùng random.
+    """
+    try:
+        from utils import encode_texts
+        try:
+            emb = encode_texts([text], device=_torch_device())  # API mới có device
+        except TypeError:
+            emb = encode_texts([text])  # API cũ
+        v = emb[0]
+        return v.tolist() if hasattr(v, "tolist") else list(v)
+    except Exception as e:
+        current_app.logger.warning("embed_text fallback (utils failed): %s", e)
+        try:
+            from sentence_transformers import SentenceTransformer
+            dev = _torch_device()
+            model = SentenceTransformer("all-MiniLM-L6-v2", device=dev)
+            v = model.encode(text, normalize_embeddings=True)
+            return v.tolist() if hasattr(v, "tolist") else list(v)
+        except Exception as ee:
+            current_app.logger.warning("embed_text second fallback failed: %s", ee)
+            import numpy as np
+            return np.random.rand(512).tolist()
+
+# ==============================
+# AUTOGEN CAPTIONS (batch cho 1 SKU)
+# ==============================
 @bp.post("/admin/captions/autogen/<int:sku_id>", endpoint="captions_autogen")
 def captions_autogen(sku_id):
     limit = int(request.form.get("limit", request.args.get("limit", 200)))
     offset = int(request.form.get("offset", request.args.get("offset", 0)))
 
-    # Lazy import để tránh tải nặng khi app start
+    # Lazy import để tránh load model khi không dùng
     try:
         from tools.qwen2vl_autogen import generate_caption_struct
-        from PIL import Image
-        import json
-        from io import BytesIO
-        from pathlib import Path
+        from PIL import Image  # noqa: F401 (đề phòng module cần)
+        from io import BytesIO  # noqa: F401
     except Exception as e:
         current_app.logger.exception("Failed to import qwen2vl tool")
         flash("Không thể nạp module qwen autogen: " + str(e), "danger")
         return redirect(url_for("skus_bp.skus"))
 
-    # Hàm hỗ trợ để chuẩn hóa vector
-    def _vec_literal(vec):
-        return "[" + ",".join(f"{float(x):.6f}" for x in vec) + "]" if vec else None
-
-    def _l2norm(v):
-        import math
-        n = math.sqrt(sum(float(x)*float(x) for x in v)) or 1.0
-        return [float(x)/n for x in v]
-
-    def embed_text(text):
-        """Trả về embedding vector cho text, sử dụng utils.encode_texts nếu có"""
-        try:
-            from utils import encode_texts
-            emb = encode_texts([text])[0]
-            return emb.tolist() if hasattr(emb, "tolist") else list(emb)
-        except Exception as e:
-            import numpy as np
-            current_app.logger.warning("embed_text fallback: %s", e)
-            return np.random.rand(512).tolist()
-
-    # Query chỉ lấy ảnh của sku_id cụ thể chưa có caption
+    # Chỉ lấy ảnh của sku_id (không ràng buộc "chưa có caption" để cho phép refresh)
     rows = q("""
         SELECT si.id, si.sku_id, si.image_path, si.ocr_text
         FROM sku_images si
-        LEFT JOIN sku_captions sc
-               ON sc.sku_id = si.sku_id AND sc.image_path = si.image_path
-               AND sc.lang = 'vi' AND sc.style = 'search'
         WHERE si.sku_id = %s
         ORDER BY si.is_primary DESC, si.id
         LIMIT %s OFFSET %s
     """, (sku_id, limit, offset))
 
     if not rows:
-        current_app.logger.info(f"No images found for sku_id {sku_id} without captions")
-        flash(f"Không tìm thấy ảnh nào cho SKU {sku_id} cần tạo caption.", "warning")
+        current_app.logger.info(f"No images found for sku_id {sku_id}")
+        flash(f"Không tìm thấy ảnh nào cho SKU {sku_id}.", "warning")
         return redirect(url_for("skus_bp.skus"))
 
     done = fail = 0
     model_name = os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct").split("/")[-1]
-    upload_dir = current_app.config.get("UPLOAD_DIR", "uploads")
+    upload_dir = current_app.config.get("UPLOAD_DIR", UPLOAD_DIR)
+
+    # Log CUDA 1 lần
+    _log_cuda_env(current_app.logger)
+    _qwen_device = _torch_device()
+    # Optionally, cho tool biết qua ENV
+    os.environ.setdefault("QWEN_DEVICE", _qwen_device)
 
     for (img_id, curr_sku_id, img_path, ocr_text) in rows:
         try:
@@ -83,12 +170,16 @@ def captions_autogen(sku_id):
                 fail += 1
                 continue
 
-            # Sinh caption và facets sử dụng generate_caption_struct
-            struct_data = generate_caption_struct(str(p), max_new_tokens=200)
+            # Sinh caption + facets
+            try:
+                struct_data = generate_caption_struct(str(p), max_new_tokens=256, device=_qwen_device)
+                print(struct_data)
+            except TypeError:
+                struct_data = generate_caption_struct(str(p), max_new_tokens=200)
 
-            # Lấy các giá trị từ struct_data
+            # Lấy các field
             caption = struct_data.get("caption", "Sản phẩm trong ảnh")
-            keywords = struct_data.get("keywords", [])  # Truyền trực tiếp danh sách cho text[]
+            keywords = struct_data.get("keywords", [])
             colors = struct_data.get("colors", [])
             shapes = struct_data.get("shapes", [])
             materials = struct_data.get("materials", [])
@@ -101,7 +192,6 @@ def captions_autogen(sku_id):
             category_guess = struct_data.get("category_guess")
             facet_scores = json.dumps(struct_data.get("facet_scores", {}), ensure_ascii=False)
 
-            print(struct_data)
             # Tạo embedding cho caption + keywords
             keywords_str = " ".join(keywords) if keywords else ""
             combined_text = f"{caption} {keywords_str}".strip()
@@ -109,7 +199,6 @@ def captions_autogen(sku_id):
             caption_vec_lit = _vec_literal(_l2norm(caption_vec)) if caption_vec else None
 
             # Đọc bytes ảnh cho md_chat_vision
-            img_bytes = None
             try:
                 with open(fpath, "rb") as fh:
                     img_bytes = fh.read()
@@ -118,14 +207,18 @@ def captions_autogen(sku_id):
                 fail += 1
                 continue
 
-            # Sinh SEO caption
+            # SEO caption (Moondream)
             try:
-                seo_caption = md_chat_vision(img_bytes, _mime_from_path(fpath), PROMPT_SEO + (f"\nOCR: {ocr_text}" if ocr_text else ""))
+                seo_caption = md_chat_vision(
+                    img_bytes,
+                    _mime_from_path(fpath),
+                    PROMPT_SEO + (f"\nOCR: {ocr_text}" if ocr_text else "")
+                )
             except Exception as e:
                 current_app.logger.warning(f"md_chat_vision failed for {fpath}: {str(e)}")
-                seo_caption = caption  # Fallback: sử dụng caption search
+                seo_caption = caption  # fallback
 
-            # Lưu caption 'search' với đầy đủ facets
+            # Lưu caption 'search'
             exec_sql("""
                 INSERT INTO sku_captions(
                     sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review,
@@ -158,7 +251,7 @@ def captions_autogen(sku_id):
                 brand_guess, variant_guess, size_guess, category_guess, facet_scores, caption_vec_lit
             ))
 
-            # Lưu caption 'seo' (chỉ caption_text)
+            # Lưu caption 'seo'
             exec_sql("""
                 INSERT INTO sku_captions(sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
                 VALUES (%s, %s, 'vi', 'seo', %s, %s, 'v1.0', TRUE)
@@ -172,93 +265,83 @@ def captions_autogen(sku_id):
         except Exception as e:
             current_app.logger.exception(f"Error processing image {img_path}: {str(e)}")
             fail += 1
+        finally:
+            # Giải phóng VRAM dần khi chạy CUDA
+            try:
+                if _HAS_TORCH and _qwen_device == "cuda":
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
+    # refresh materialized view (best-effort)
     try:
         exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
     except Exception as e:
         current_app.logger.warning(f"Failed to refresh search corpus: {str(e)}")
 
-    flash(f"Autogen xong cho SKU {sku_id}: thành công {done}, lỗi {fail}", "success" if fail == 0 else "warning")
+    flash(f"Autogen xong cho SKU {sku_id}: thành công {done}, lỗi {fail}",
+          "success" if fail == 0 else "warning")
     return redirect(url_for("skus_bp.skus"))
 
+# ==============================
+# SUGGEST CAPTION (write via API)
+# ==============================
 @bp.post("/captions/suggest", endpoint="captions_suggest")
 def captions_suggest():
-    """API endpoint to save/update caption suggestions with full metadata"""
+    """API endpoint to save/update caption suggestions với đầy đủ metadata."""
     try:
         d = request.get_json(force=True)
-        current_app.logger.info("captions_suggest received payload: %s", json.dumps(d, ensure_ascii=False)[:500])
-        
+        current_app.logger.info(
+            "captions_suggest payload: %s",
+            json.dumps(d, ensure_ascii=False)[:1000]
+        )
+
         # Validate required fields
         required_fields = ["sku_id", "image_path", "style", "caption_text", "model_name"]
         for field in required_fields:
             if not d.get(field):
                 return jsonify({"ok": False, "error": f"Missing required field: {field}"}), 400
-        
+
         caption_text = (d["caption_text"] or "").strip()
         if not caption_text:
             return jsonify({"ok": False, "error": "Caption text cannot be empty"}), 400
-        
-        # Extract metadata arrays (default to empty if not provided)
-        keywords = d.get("keywords", [])
-        colors = d.get("colors", [])
-        shapes = d.get("shapes", [])
+
+        # Arrays
+        keywords  = d.get("keywords", [])
+        colors    = d.get("colors", [])
+        shapes    = d.get("shapes", [])
         materials = d.get("materials", [])
         packaging = d.get("packaging", [])
-        taste = d.get("taste", [])
-        texture = d.get("texture", [])
-        
-        # Extract guess fields
-        brand_guess = d.get("brand_guess")
+        taste     = d.get("taste", [])
+        texture   = d.get("texture", [])
+
+        # Guess fields
+        brand_guess   = d.get("brand_guess")
         variant_guess = d.get("variant_guess")
-        size_guess = d.get("size_guess")
-        category_guess = d.get("category_guess")
-        
-        # facet_scores as JSON string (for PostgreSQL jsonb column)
-        facet_scores = d.get("facet_scores", [])
+        size_guess    = d.get("size_guess")
+        category_guess= d.get("category_guess")
+
+        # facet_scores: jsonb
+        facet_scores = d.get("facet_scores", {})
         facet_scores_json = json.dumps(facet_scores, ensure_ascii=False) if facet_scores else None
-        
-        # Generate caption embedding
+
+        # Embedding (GPU nếu có)
         caption_vec_lit = None
         try:
-            from utils import encode_texts
-            emb = encode_texts([caption_text])[0]
-            vec_list = emb.tolist() if hasattr(emb, "tolist") else list(emb)
-            # Normalize vector
-            import math
-            norm = math.sqrt(sum(x*x for x in vec_list)) or 1.0
-            vec_normalized = [x/norm for x in vec_list]
-            caption_vec_lit = "[" + ",".join(f"{float(x):.6f}" for x in vec_normalized) + "]"
-            current_app.logger.info("Generated caption_vec with length %d", len(vec_normalized))
+            v = embed_text(caption_text)
+            v = _l2norm(v)
+            caption_vec_lit = _vec_literal(v)
+            current_app.logger.info("Generated caption_vec length=%d", len(v))
         except Exception as e:
             current_app.logger.warning("Failed to generate caption embedding: %s", e)
-        
-        # Build SQL params tuple
+
         sql_params = (
-            d["sku_id"], 
-            d["image_path"], 
-            d["style"], 
-            caption_text, 
-            caption_vec_lit,
-            d["model_name"], 
-            d.get("prompt_version", "v1.0"),
-            keywords, 
-            colors, 
-            shapes, 
-            materials, 
-            packaging, 
-            taste, 
-            texture,
-            brand_guess, 
-            variant_guess, 
-            size_guess, 
-            category_guess, 
-            facet_scores_json
+            d["sku_id"], d["image_path"], d["style"], caption_text, caption_vec_lit,
+            d["model_name"], d.get("prompt_version", "v1.0"),
+            keywords, colors, shapes, materials, packaging, taste, texture,
+            brand_guess, variant_guess, size_guess, category_guess, facet_scores_json
         )
-        
-        current_app.logger.info("SQL params prepared (types): %s", 
-            [type(p).__name__ for p in sql_params])
-        
-        # Insert/update with full metadata
+
         result = exec_sql("""
             INSERT INTO sku_captions (
                 sku_id, image_path, lang, style, caption_text, caption_vec,
@@ -267,7 +350,9 @@ def captions_suggest():
                 brand_guess, variant_guess, size_guess, category_guess, facet_scores,
                 created_at
             )
-            VALUES (%s,%s,'vi',%s,%s,%s::vector,%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            VALUES (%s,%s,'vi',%s,%s,%s::vector,%s,%s,TRUE,
+                    %s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,NOW())
             ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version)
             DO UPDATE SET 
                 caption_text = EXCLUDED.caption_text,
@@ -287,45 +372,44 @@ def captions_suggest():
                 needs_review = TRUE
             RETURNING id
         """, sql_params, returning=True)
-        
+
         caption_id = result[0] if result else None
-        current_app.logger.info("Caption saved successfully with id=%s", caption_id)
-        
-        # Refresh corpus (non-blocking)
+
+        # refresh corpus (best-effort)
         try:
             exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
         except Exception:
             pass
-        
+
         return jsonify({"ok": True, "caption_id": caption_id, "message": "Caption saved successfully"})
-        
+
     except Exception as e:
         current_app.logger.exception("Error saving caption suggestion")
-        # Return detailed error for debugging
-        import traceback
-        error_detail = {
+        return jsonify({
+            "ok": False,
             "error": str(e),
             "type": type(e).__name__,
             "traceback": traceback.format_exc()
-        }
-        return jsonify({"ok": False, **error_detail}), 500
+        }), 500
 
+# ==============================
+# LABEL CAPTION (human feedback)
+# ==============================
 @bp.post("/captions/<int:caption_id>/label", endpoint="captions_label")
 def captions_label(caption_id):
-    """API endpoint to save human feedback/labels for captions"""
+    """Save human feedback/labels cho caption."""
     try:
         d = request.get_json(force=True)
-        
-        # Validate caption exists
-        caption = q("SELECT id, caption_text FROM sku_captions WHERE id = %s", (caption_id,), fetch="one")
-        if not caption:
+
+        cap = q("SELECT id, caption_text FROM sku_captions WHERE id = %s",
+                (caption_id,), fetch="one")
+        if not cap:
             return {"ok": False, "error": "Caption not found"}, 404
-        
+
         is_acceptable = bool(d.get("is_acceptable", True))
         corrected_text = (d.get("corrected_text") or "").strip() or None
         notes = (d.get("notes") or "").strip() or None
-        
-        # Save human label/feedback
+
         exec_sql("""
             INSERT INTO caption_labels (caption_id, is_acceptable, corrected_text, notes, created_at)
             VALUES (%s,%s,%s,%s,NOW())
@@ -335,85 +419,76 @@ def captions_label(caption_id):
                 notes = EXCLUDED.notes,
                 updated_at = NOW()
         """, (caption_id, is_acceptable, corrected_text, notes))
-        
-        # Update caption needs_review status based on feedback
+
         exec_sql("""
             UPDATE sku_captions 
-            SET needs_review = CASE 
-                WHEN %s = TRUE THEN FALSE  -- acceptable = no more review needed
-                ELSE TRUE                  -- not acceptable = still needs review
-            END,
-            updated_at = NOW()
+            SET needs_review = CASE WHEN %s = TRUE THEN FALSE ELSE TRUE END,
+                updated_at = NOW()
             WHERE id = %s
         """, (is_acceptable, caption_id))
-        
-        # If corrected text provided, optionally create new caption version
-        if corrected_text and corrected_text != caption.caption_text:
+
+        # Nếu có corrected_text -> tạo phiên bản corrected (ghi đè theo (sku,image,style,model,version))
+        if corrected_text and corrected_text != cap.caption_text:
             try:
-                # Generate vector for corrected text
-                corrected_vector = None
+                # vector cho corrected_text
+                corrected_vec_lit = None
                 try:
-                    from sentence_transformers import SentenceTransformer
-                    from utils import vn_norm
-                    model = SentenceTransformer("all-MiniLM-L6-v2")
-                    normalized = vn_norm(corrected_text)
-                    embedding = model.encode(normalized, normalize_embeddings=True)
-                    corrected_vector = embedding.tolist()
+                    v = embed_text(corrected_text)
+                    v = _l2norm(v)
+                    corrected_vec_lit = _vec_literal(v)
                 except Exception as e:
-                    current_app.logger.warning("Failed to generate vector for corrected text: %s", e)
-                
-                # Get original caption info for creating corrected version
+                    current_app.logger.warning("Vector for corrected text failed: %s", e)
+
                 original = q("""
                     SELECT sku_id, image_path, lang, style, model_name, prompt_version
                     FROM sku_captions WHERE id = %s
                 """, (caption_id,), fetch="one")
-                
+
                 if original:
                     exec_sql("""
                         INSERT INTO sku_captions (
-                            sku_id, image_path, lang, style, caption_text, caption_vector,
+                            sku_id, image_path, lang, style, caption_text, caption_vec,
                             model_name, prompt_version, needs_review, created_at, updated_at
                         )
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,FALSE,NOW(),NOW())
+                        VALUES (%s,%s,%s,%s,%s,%s::vector,%s,%s,FALSE,NOW(),NOW())
                         ON CONFLICT (sku_id, image_path, lang, style, model_name, prompt_version)
                         DO UPDATE SET 
                             caption_text = EXCLUDED.caption_text,
-                            caption_vector = EXCLUDED.caption_vector,
+                            caption_vec = EXCLUDED.caption_vec,
                             needs_review = FALSE,
                             updated_at = NOW()
                     """, (
                         original.sku_id, original.image_path, original.lang, original.style,
-                        corrected_text, corrected_vector,
+                        corrected_text, corrected_vec_lit,
                         f"{original.model_name}-corrected", original.prompt_version
                     ))
-                    current_app.logger.info("Created corrected caption version for caption_id=%s", caption_id)
-                    
+                    current_app.logger.info("Created corrected caption version for id=%s", caption_id)
+
             except Exception as e:
                 current_app.logger.exception("Failed to create corrected caption version")
-                # Non-fatal - original label still saved
-        
-        # Refresh search corpus to include updated captions
+                # Non-fatal
+
         try:
             exec_sql("REFRESH MATERIALIZED VIEW CONCURRENTLY sku_search_corpus")
         except Exception as e:
             current_app.logger.warning("Failed to refresh search corpus after labeling: %s", e)
-        
-        return {
-            "ok": True, 
-            "message": "Caption feedback saved successfully"
-        }
-        
+
+        return {"ok": True, "message": "Caption feedback saved successfully"}
+
     except Exception as e:
         current_app.logger.exception("Error saving caption label")
         return {"ok": False, "error": str(e)}, 500
 
+# ==============================
+# GET pending-review captions
+# ==============================
 @bp.get("/captions/pending-review")
 def captions_pending_review():
-    """Get captions that need human review"""
+    """Get captions cần review."""
     try:
         limit = int(request.args.get("limit", 50))
         offset = int(request.args.get("offset", 0))
-        
+
         captions = q("""
             SELECT 
                 c.id, c.sku_id, c.image_path, c.style, c.caption_text, 
@@ -427,26 +502,26 @@ def captions_pending_review():
             ORDER BY c.created_at DESC
             LIMIT %s OFFSET %s
         """, (limit, offset))
-        
+
         total = q("SELECT COUNT(*) FROM sku_captions WHERE needs_review = TRUE", fetch="one")[0]
-        
+
         return {
             "ok": True,
             "captions": [dict(c._asdict()) for c in captions] if captions else [],
-            "total": total,
-            "limit": limit,
-            "offset": offset
+            "total": total, "limit": limit, "offset": offset
         }
-        
+
     except Exception as e:
         current_app.logger.exception("Error fetching pending review captions")
         return {"ok": False, "error": str(e)}, 500
 
+# ==============================
+# TEST single-image generation (no DB write)
+# ==============================
 @bp.post("/admin/captions/test_qwen/<int:sku_id>")
 def test_qwen_caption(sku_id):
     """
-    Test endpoint để tạo caption cho 1 ảnh của SKU và trả về JSON
-    Không lưu vào database, chỉ test generation
+    Test endpoint tạo caption cho 1 ảnh (search + seo) và trả JSON (không lưu DB).
     """
     try:
         from tools.qwen2vl_autogen import generate_caption
@@ -454,7 +529,11 @@ def test_qwen_caption(sku_id):
     except Exception as e:
         return {"ok": False, "error": f"Cannot load qwen module: {str(e)}"}, 500
 
-    # Get primary image for this SKU
+    # Log CUDA
+    _log_cuda_env(current_app.logger)
+    dev = _torch_device()
+    os.environ.setdefault("QWEN_DEVICE", dev)
+
     row = q("""
         SELECT si.id, si.sku_id, si.image_path, si.ocr_text, s.name
         FROM sku_images si
@@ -468,32 +547,33 @@ def test_qwen_caption(sku_id):
         return {"ok": False, "error": f"No images found for SKU {sku_id}"}, 404
 
     img_id, curr_sku_id, image_path, ocr_text, sku_name = row
-    # use configured upload dir if present, otherwise a safe raw Windows path
     upload_dir = current_app.config.get("UPLOAD_DIR",
                 r"E:\api_hango\flask_pgvector_shop\flask_pgvector_shop\uploads")
+
     try:
         fpath = image_path if os.path.isabs(image_path) else os.path.join(upload_dir, image_path)
         if not os.path.exists(fpath):
             return {"ok": False, "error": f"Image file not found: {fpath}"}, 404
 
         img = Image.open(fpath).convert("RGB")
-        print(fpath)
 
-        # Generate prompts
         prompt_search = PROMPT_SEARCH + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
         prompt_seo    = PROMPT_SEO    + (f"\nVăn bản OCR: {ocr_text}" if ocr_text else "")
 
-        # Test caption generation
-        start_time = time.time()
-        
-        search_caption = generate_caption(img, prompt_search)
-        search_time = time.time() - start_time
-        
-        seo_start = time.time()
-        seo_caption = generate_caption(img, prompt_seo)
-        seo_time = time.time() - seo_start
+        t0 = time.time()
+        # gọi với device nếu tool hỗ trợ
+        try:
+            search_caption = generate_caption(img, prompt_search, device=dev)
+        except TypeError:
+            search_caption = generate_caption(img, prompt_search)
+        t1 = time.time()
 
-        total_time = time.time() - start_time
+        try:
+            seo_caption = generate_caption(img, prompt_seo, device=dev)
+        except TypeError:
+            seo_caption = generate_caption(img, prompt_seo)
+        t2 = time.time()
+
         return {
             "ok": True,
             "sku_id": sku_id,
@@ -503,22 +583,15 @@ def test_qwen_caption(sku_id):
             "image_id": img_id,
             "ocr_text": ocr_text,
             "captions": {
-                "search": {
-                    "text": search_caption,
-                    "prompt": prompt_search,
-                    "generation_time": round(search_time, 2)
-                },
-                "seo": {
-                    "text": seo_caption,
-                    "prompt": prompt_seo,
-                    "generation_time": round(seo_time, 2)
-                }
+                "search": {"text": search_caption, "prompt": prompt_search, "generation_time": round(t1 - t0, 2)},
+                "seo":    {"text": seo_caption,    "prompt": prompt_seo,    "generation_time": round(t2 - t1, 2)},
             },
-            "total_time": round(total_time, 2),
+            "total_time": round(t2 - t0, 2),
             "model_info": {
                 "backend": os.getenv("QWEN_VL_BACKEND", "transformers"),
                 "model_path": os.getenv("QWEN_GGUF", ""),
-                "hf_base": os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct")
+                "hf_base": os.getenv("QWEN_VL_BASE", "Qwen/Qwen2-VL-2B-Instruct"),
+                "device": dev
             }
         }
 
@@ -526,11 +599,14 @@ def test_qwen_caption(sku_id):
         current_app.logger.exception("Error testing Qwen caption generation")
         return {"ok": False, "error": str(e)}, 500
 
+# ==============================
+# Save test captions to DB
+# ==============================
 @bp.post("/admin/captions/save_test_caption")
 def save_test_caption():
     """
-    Lưu caption đã test vào database
-    Expects JSON: {"sku_id": 123, "image_path": "...", "search_caption": "...", "seo_caption": "...}
+    Lưu caption đã test vào DB.
+    Payload: {"sku_id": ..., "image_path": "...", "search_caption": "...", "seo_caption": "..."}
     """
     try:
         data = request.get_json()
@@ -544,10 +620,9 @@ def save_test_caption():
 
         sku_id = int(data["sku_id"])
         image_path = data["image_path"]
-        search_caption = data["search_caption"].strip()
-        seo_caption = data["seo_caption"].strip()
+        search_caption = (data["search_caption"] or "").strip()
+        seo_caption = (data["seo_caption"] or "").strip()
 
-        # Save both captions
         exec_sql("""
             INSERT INTO sku_captions
                 (sku_id, image_path, lang, style, caption_text, model_name, prompt_version, needs_review)
@@ -564,30 +639,24 @@ def save_test_caption():
                SET caption_text = EXCLUDED.caption_text, needs_review = TRUE
         """, (sku_id, image_path, seo_caption, "qwen2vl-test"))
 
-        # Refresh corpus
         try:
             exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
         except Exception:
             pass
 
-        return {
-            "ok": True,
-            "message": f"Saved captions for SKU {sku_id}",
-            "sku_id": sku_id,
-            "captions_saved": 2
-        }
+        return {"ok": True, "message": f"Saved captions for SKU {sku_id}", "sku_id": sku_id, "captions_saved": 2}
 
     except Exception as e:
         current_app.logger.exception("Error saving test caption")
         return {"ok": False, "error": str(e)}, 500
 
-# === READ: lấy captions theo SKU (group theo ảnh, style) ===
+# ==============================
+# READ: captions by SKU
+# ==============================
 @bp.get("/captions/by-sku/<int:sku_id>", endpoint="captions_by_sku")
 def captions_by_sku(sku_id: int):
     """
-    Trả về JSON danh sách caption cho 1 SKU:
-    - Có thể lọc theo style (=search|seo|all) & needs_review (=1|0|all)
-    - Mặc định: all
+    Trả về JSON danh sách caption cho 1 SKU; filter theo style (search|seo|all) & needs_review (1|0|all)
     """
     style = (request.args.get("style") or "all").lower()
     nr = request.args.get("needs_review", "all").lower()
@@ -615,16 +684,14 @@ def captions_by_sku(sku_id: int):
         ORDER BY c.image_path, c.style, c.created_at DESC
     """
     rows = q(sql, tuple(params)) or []
-    return {
-        "ok": True,
-        "captions": [dict(r._asdict()) for r in rows],
-        "sku_id": sku_id
-    }
+    return {"ok": True, "captions": [dict(r._asdict()) for r in rows], "sku_id": sku_id}
 
-# === FORM-ACTIONS: accept / reject / ground truth / delete ===
+# ==============================
+# FORM actions: accept / reject / ground truth / delete
+# ==============================
 def _caption_exists(caption_id: int):
-    cap = q("SELECT id, sku_id, style, image_path FROM sku_captions WHERE id=%s", (caption_id,), fetch="one")
-    return cap
+    return q("SELECT id, sku_id, style, image_path FROM sku_captions WHERE id=%s",
+             (caption_id,), fetch="one")
 
 @bp.post("/admin/captions/<int:caption_id>/accept", endpoint="caption_accept")
 def caption_accept(caption_id: int):
@@ -633,8 +700,10 @@ def caption_accept(caption_id: int):
         flash("Caption không tồn tại", "danger")
         return redirect(request.referrer or url_for("skus_bp.skus"))
     exec_sql("UPDATE sku_captions SET needs_review=FALSE, updated_at=NOW() WHERE id=%s", (caption_id,))
-    try: exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
-    except: pass
+    try:
+        exec_sql("SELECT refresh_sku_search_corpus()", returning=True)
+    except Exception:
+        pass
     flash(f"Đã đánh dấu caption #{caption_id} là ACCEPTED", "success")
     return redirect(request.referrer or url_for("skus_bp.skus"))
 
@@ -645,7 +714,6 @@ def caption_reject(caption_id: int):
         flash("Caption không tồn tại", "danger")
         return redirect(request.referrer or url_for("skus_bp.skus"))
     notes = (request.form.get("notes") or "").strip() or None
-    # Lưu label + giữ needs_review=TRUE
     exec_sql("""
         INSERT INTO caption_labels(caption_id, is_acceptable, corrected_text, notes, created_at)
         VALUES (%s, FALSE, NULL, %s, NOW())
@@ -657,13 +725,8 @@ def caption_reject(caption_id: int):
 
 @bp.post("/admin/captions/<int:caption_id>/ground", endpoint="caption_ground")
 def caption_ground(caption_id: int):
-    """
-    Đánh dấu caption là Ground Truth cho cặp (sku_id, image_path, style)
-    Và huỷ GT của các caption khác cùng (sku, image, style).
-    """
-    cap = q("""
-        SELECT id, sku_id, image_path, style FROM sku_captions WHERE id=%s
-    """, (caption_id,), fetch="one")
+    cap = q("SELECT id, sku_id, image_path, style FROM sku_captions WHERE id=%s",
+            (caption_id,), fetch="one")
     if not cap:
         flash("Caption không tồn tại", "danger")
         return redirect(request.referrer or url_for("skus_bp.skus"))
@@ -687,33 +750,34 @@ def caption_delete(caption_id: int):
     flash(f"Đã xoá caption #{caption_id}", "secondary")
     return redirect(request.referrer or url_for("skus_bp.skus"))
 
+# ==============================
+# API: images pending (no search caption yet)
+# ==============================
 @bp.get("/api/captions/pending", endpoint="api_captions_pending")
 def api_captions_pending():
     """
-    API: Lấy danh sách ảnh chưa có caption
+    API: Lấy danh sách ảnh chưa có caption 'search' (có filter theo model_name).
     Query params:
-      - sku_id: filter by SKU (optional)
-      - limit: max results (default 100)
-      - model_name: filter images without captions from this model (optional)
-    Returns: {"ok": true, "images": [{sku_id, image_id, image_path, ocr_text}, ...]}
+      - sku_id (int, optional)
+      - limit (int, default=100)
+      - model_name (str, optional)
     """
     try:
         sku_id = request.args.get("sku_id", type=int)
         limit = request.args.get("limit", type=int, default=100)
         model_name = request.args.get("model_name", type=str)
-        
-        where_clauses = []
-        params = []
-        
+
+        where_clauses, params = [], []
+
         if sku_id:
             where_clauses.append("si.sku_id = %s")
             params.append(sku_id)
-        
-        # Chỉ lấy ảnh chưa có caption style='search' với model_name cụ thể
+
         if model_name:
             where_clauses.append("""
                 NOT EXISTS (
-                    SELECT 1 FROM sku_captions sc 
+                    SELECT 1
+                    FROM sku_captions sc 
                     WHERE sc.sku_id = si.sku_id 
                       AND sc.image_path = si.image_path 
                       AND sc.style = 'search'
@@ -722,19 +786,19 @@ def api_captions_pending():
             """)
             params.append(model_name)
         else:
-            # Fallback: chưa có caption nào với style='search'
             where_clauses.append("""
                 NOT EXISTS (
-                    SELECT 1 FROM sku_captions sc 
+                    SELECT 1
+                    FROM sku_captions sc 
                     WHERE sc.sku_id = si.sku_id 
                       AND sc.image_path = si.image_path 
                       AND sc.style = 'search'
                 )
             """)
-        
+
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
         params.append(limit)
-        
+
         rows = q(f"""
             SELECT si.id as image_id, si.sku_id, si.image_path, si.ocr_text
             FROM sku_images si
@@ -742,18 +806,13 @@ def api_captions_pending():
             ORDER BY si.sku_id, si.is_primary DESC, si.id
             LIMIT %s
         """, tuple(params))
-        
-        images = []
-        for row in (rows or []):
-            images.append({
-                "image_id": row[0],
-                "sku_id": row[1],
-                "image_path": row[2],
-                "ocr_text": row[3]
-            })
-        
+
+        images = [{
+            "image_id": r[0], "sku_id": r[1], "image_path": r[2], "ocr_text": r[3]
+        } for r in (rows or [])]
+
         return jsonify({"ok": True, "images": images, "count": len(images)})
-        
+
     except Exception as e:
         current_app.logger.exception("Error in api_captions_pending")
         return jsonify({"ok": False, "error": str(e)}), 500

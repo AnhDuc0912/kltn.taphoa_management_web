@@ -19,7 +19,7 @@
     <!-- Admin stats button -->
     <button class="btn btn-secondary" onclick="loadAdminStats()">📈 Thống kê</button>
     
-    <a class="btn btn-primary" href="{{ url_for('skus_bp.sku_new') }}">+ Thêm SKU</a>
+    <a class="btn btn-primary" href="{{ url_for('skus.sku_new') }}">+ Thêm SKU</a>
   </div>
 </div>
 
@@ -133,10 +133,10 @@
         <td>{{ size_tx or '' }}</td>
         <td>{{ '✅' if is_active else '❌' }}</td>
         <td class="text-end d-flex gap-1 justify-content-end">
-          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('skus_bp.sku_edit', sku_id=id) }}" title="Sửa SKU">Sửa</a>
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('skus.sku_edit', sku_id=id) }}" title="Sửa SKU">Sửa</a>
           <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('sku_images_bp.sku_images', sku_id=id) }}" title="Quản lý ảnh">Ảnh</a>
           <a class="btn btn-sm btn-outline-dark" href="{{ url_for('sku_texts_bp.sku_texts_add', sku_id=id) }}" title="Mô tả chuẩn hoá">Mô tả</a>
-          <form class="d-inline" method="post" action="{{ url_for('skus_bp.sku_delete', sku_id=id) }}" onsubmit="return confirm('Xoá SKU?')">
+          <form class="d-inline" method="post" action="{{ url_for('skus.sku_delete', sku_id=id) }}" onsubmit="return confirm('Xoá SKU?')">
             <button class="btn btn-sm btn-outline-danger">Xoá</button>
           </form>
         </td>

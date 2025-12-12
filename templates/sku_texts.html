@@ -202,125 +202,56 @@
   </div>
 </div>
 
-<div class="card mt-3">
-  <div class="card-header py-2 d-flex align-items-center">
-    <b class="me-auto">📄 Mô tả tự động đã tạo (theo ảnh & kiểu)</b>
-    <form class="d-inline-block" method="get" action="{{ url_for('captions_bp.captions_by_sku', sku_id=sku[0]) }}">
-      <div class="input-group input-group-sm" style="width: 360px;">
-        <select name="style" class="form-select">
-          <option value="all">Tất cả kiểu</option>
-          <option value="search">Kiểu tìm kiếm (search)</option>
-          <option value="seo">Kiểu SEO (seo)</option>
-        </select>
-        <select name="needs_review" class="form-select">
-          <option value="all">Tất cả trạng thái</option>
-          <option value="1">Cần duyệt</option>
-          <option value="0">Đã duyệt</option>
-        </select>
-        <button class="btn btn-outline-secondary">Xem JSON</button>
-      </div>
-    </form>
+<!-- Bảng facet từ database -->
+<div class="card mt-4">
+  <div class="card-header py-2">
+    <b>Facet trong Database</b>
   </div>
-
   <div class="card-body">
     <div class="table-responsive">
-      <table class="table table-sm align-middle">
-        <thead>
+      <table class="table table-bordered table-sm">
+        <thead class="table-light">
           <tr>
-            <th style="width:70px">Mã</th>
-            <th>Ảnh</th>
-            <th style="width:90px">Kiểu</th>
-            <th>Mô tả</th>
-            <th style="width:170px">Mô hình</th>
-            <th style="width:120px">Trạng thái</th>
-            <th class="text-end" style="width:280px">Thao tác</th>
+            <th>keywords</th>
+            <th>colors</th>
+            <th>shapes</th>
+            <th>materials</th>
+            <th>packaging</th>
+            <th>taste</th>
+            <th>texture</th>
+            <th>brand_guess</th>
+            <th>variant_guess</th>
+            <th>size_guess</th>
+            <th>category_guess</th>
           </tr>
         </thead>
         <tbody>
-          {% if rows_captions and rows_captions|length > 0 %}
-            {% for r in rows_captions %}
-              <tr>
-                <td class="text-muted">#{{ r.id }}</td>
-                <td>
-                  <div class="d-flex align-items-center gap-2">
-                    {% if r.image_path %}
-                      <img src="{{ (cover_url|default('') and cover_url) or url_for('static', filename=r.image_path) if False else ('/uploads/' ~ r.image_path) }}"
-                           style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #eee">
-                    {% endif %}
-                    <div>
-                      <div class="small text-muted">{{ r.image_path }}</div>
-                      {% if r.brand_guess or r.variant_guess or r.size_guess %}
-                        <div class="small">
-                          {% if r.brand_guess %}<span class="badge bg-light text-dark">thương hiệu: {{ r.brand_guess }}</span>{% endif %}
-                          {% if r.variant_guess %}<span class="badge bg-light text-dark">phiên bản: {{ r.variant_guess }}</span>{% endif %}
-                          {% if r.size_guess %}<span class="badge bg-light text-dark">kích cỡ: {{ r.size_guess }}</span>{% endif %}
-                        </div>
-                      {% endif %}
-                    </div>
-                  </div>
-                </td>
-                <td>
-                  <span class="badge {% if r.style=='search' %}bg-primary-subtle text-primary{% else %}bg-warning-subtle text-dark{% endif %}">
-                    {% if r.style == 'search' %}
-                      Tìm kiếm
-                    {% elif r.style == 'seo' %}
-                      SEO
-                    {% else %}
-                      {{ r.style }}
-                    {% endif %}
-                  </span>
-                </td>
-                <td style="max-width: 560px">
-                  <div>{{ r.caption_text }}</div>
-                  <div class="small text-muted mt-1">
-                    {% if r.keywords and r.keywords|length %}<span class="badge bg-secondary-subtle border text-dark">từ khoá: {{ r.keywords|length }}</span>{% endif %}
-                    {% if r.colors and r.colors|length %}<span class="badge bg-secondary-subtle border text-dark">màu: {{ r.colors|length }}</span>{% endif %}
-                    {% if r.materials and r.materials|length %}<span class="badge bg-secondary-subtle border text-dark">chất liệu: {{ r.materials|length }}</span>{% endif %}
-                    {% if r.category_guess %}<span class="badge bg-light text-dark">danh mục: {{ r.category_guess }}</span>{% endif %}
-                    <span class="ms-2">({{ r.created_at }})</span>
-                  </div>
-                </td>
-                <td>
-                  <div class="small">{{ r.model_name }}<br><span class="text-muted">{{ r.prompt_version }}</span></div>
-                </td>
-                <td>
-                  {% if r.is_ground_truth %}
-                    <span class="badge bg-success">Nhãn chuẩn (Ground Truth)</span><br>
-                  {% endif %}
-                  {% if r.needs_review %}
-                    <span class="badge bg-danger-subtle text-danger">Cần duyệt</span>
-                  {% else %}
-                    <span class="badge bg-success-subtle text-success">Đã ổn</span>
-                  {% endif %}
-                </td>
-                <td class="text-end">
-                  <div class="d-flex gap-1 justify-content-end">
-                    <form method="post" action="{{ url_for('captions_bp.caption_accept', caption_id=r.id) }}">
-                      <button class="btn btn-sm btn-success">✔️ Duyệt</button>
-                    </form>
-                    <form method="post" action="{{ url_for('captions_bp.caption_reject', caption_id=r.id) }}"
-                          onsubmit="return confirm('Từ chối mô tả này?')">
-                      <input type="hidden" name="notes" value="">
-                      <button class="btn btn-sm btn-outline-danger">❌ Từ chối</button>
-                    </form>
-                    <form method="post" action="{{ url_for('captions_bp.caption_ground', caption_id=r.id) }}">
-                      <button class="btn btn-sm btn-outline-success">🌟 Chọn làm nhãn chuẩn</button>
-                    </form>
-                    <form method="post" action="{{ url_for('captions_bp.caption_delete', caption_id=r.id) }}"
-                          onsubmit="return confirm('Xoá mô tả này?')">
-                      <button class="btn btn-sm btn-outline-secondary">🗑️ Xoá</button>
-                    </form>
-                  </div>
-                </td>
-              </tr>
-            {% endfor %}
+          {% if facet_row %}
+          <tr>
+            <td>{{ facet_row.keywords }}</td>
+            <td>{{ facet_row.colors }}</td>
+            <td>{{ facet_row.shapes }}</td>
+            <td>{{ facet_row.materials }}</td>
+            <td>{{ facet_row.packaging }}</td>
+            <td>{{ facet_row.taste }}</td>
+            <td>{{ facet_row.texture }}</td>
+            <td>{{ facet_row.brand_guess }}</td>
+            <td>{{ facet_row.variant_guess }}</td>
+            <td>{{ facet_row.size_guess }}</td>
+            <td>{{ facet_row.category_guess }}</td>
+          </tr>
           {% else %}
-            <tr><td colspan="7" class="text-center text-muted">Chưa có mô tả nào</td></tr>
+          <tr>
+            <td colspan="11" class="text-center text-muted py-3">
+              ❗ Không có dữ liệu facet — backend chưa truyền hoặc không có trong database.
+            </td>
+          </tr>
           {% endif %}
         </tbody>
       </table>
     </div>
   </div>
 </div>
+
 
 {% endblock %}

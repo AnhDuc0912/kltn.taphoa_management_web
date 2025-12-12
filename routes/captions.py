@@ -816,3 +816,52 @@ def api_captions_pending():
     except Exception as e:
         current_app.logger.exception("Error in api_captions_pending")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+# ==============================
+# Helper for available facet names (based on DB schema/model output)
+# ==============================
+@bp.get("/skus/<int:sku_id>/facets", endpoint="sku_facets")
+def sku_facets(sku_id):
+    """
+    Trả về facet đã lưu trong sku_captions cho 1 SKU.
+    Dùng để hiển thị bảng facet trong giao diện.
+    """
+    try:
+        rows = q("""
+            SELECT 
+                keywords, colors, shapes, materials, packaging, taste, texture,
+                brand_guess, variant_guess, size_guess, category_guess
+            FROM sku_captions
+            WHERE sku_id = %s
+            ORDER BY id DESC 
+            LIMIT 1
+        """, (sku_id,))
+
+        if not rows:
+            return jsonify({
+                "ok": False,
+                "message": "No facet data in database"
+            }), 200
+
+        row = rows[0]
+
+        return jsonify({
+            "ok": True,
+            "data": {
+                "keywords": row["keywords"],
+                "colors": row["colors"],
+                "shapes": row["shapes"],
+                "materials": row["materials"],
+                "packaging": row["packaging"],
+                "taste": row["taste"],
+                "texture": row["texture"],
+                "brand_guess": row["brand_guess"],
+                "variant_guess": row["variant_guess"],
+                "size_guess": row["size_guess"],
+                "category_guess": row["category_guess"],
+            }
+        })
+
+    except Exception as e:
+        current_app.logger.exception("Failed to load facets")
+        return jsonify({"ok": False, "error": str(e)}), 500

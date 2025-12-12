@@ -3,7 +3,6 @@ import os, time, json, traceback
 from pathlib import Path
 from flask import Blueprint, request, redirect, url_for, flash, current_app, jsonify
 from services.db_utils import q, exec_sql
-from services.moondream_service import md_chat_vision, _mime_from_path
 
 bp = Blueprint("captions_bp", __name__)
 
@@ -686,9 +685,66 @@ def captions_by_sku(sku_id: int):
     rows = q(sql, tuple(params)) or []
     return {"ok": True, "captions": [dict(r._asdict()) for r in rows], "sku_id": sku_id}
 
-# ==============================
-# FORM actions: accept / reject / ground truth / delete
-# ==============================
+
+@bp.get("/api/captions/export/<int:sku_id>", endpoint="api_captions_export")
+def api_captions_export(sku_id: int):
+    """
+    Export captions for a SKU as TSV matching the requested header layout.
+    Returns attachment `captions_sku_<sku_id>.tsv`.
+    """
+    try:
+        sql = """
+            SELECT 
+                c.id, c.sku_id, c.image_path, c.lang, c.style, c.caption_text,
+                c.model_name, c.prompt_version, c.clip_score, c.cov_brand, c.cov_variant, c.cov_size,
+                c.needs_review, c.created_at, c.summary_text, c.is_ground_truth,
+                c.keywords, c.colors, c.shapes, c.materials, c.packaging, c.taste, c.texture,
+                c.brand_guess, c.variant_guess, c.size_guess, c.category_guess, c.facet_scores, c.caption_vec
+            FROM sku_captions c
+            WHERE c.sku_id = %s
+            ORDER BY c.image_path, c.style, c.created_at
+        """
+        rows = q(sql, (sku_id,)) or []
+
+        cols = [
+            "id","sku_id","image_path","lang","style","caption_text","model_name","prompt_version",
+            "clip_score","cov_brand","cov_variant","cov_size","needs_review","created_at","summary_text","is_ground_truth",
+            "keywords","colors","shapes","materials","packaging","taste","texture",
+            "brand_guess","variant_guess","size_guess","category_guess","facet_scores","caption_vec","tsv"
+        ]
+
+        lines = ["\t".join(cols)]
+        for r in rows:
+            d = dict(r._asdict()) if hasattr(r, "_asdict") else dict(zip(cols, r))
+
+            def fmt_val(v):
+                if v is None:
+                    return ""
+                if isinstance(v, (list, tuple, dict)):
+                    return json.dumps(v, ensure_ascii=False)
+                try:
+                    from datetime import datetime
+                    if isinstance(v, datetime):
+                        return v.isoformat()
+                except Exception:
+                    pass
+                return str(v)
+
+            row_vals = [fmt_val(d.get(c)) for c in cols[:-1]] + [""]
+            safe_vals = [v.replace("\n", " ").replace("\r", " ") for v in row_vals]
+            lines.append("\t".join(safe_vals))
+
+        body = "\n".join(lines)
+        fname = f"captions_sku_{sku_id}.tsv"
+        return Response(body, mimetype="text/tab-separated-values; charset=utf-8", headers={
+            "Content-Disposition": f"attachment; filename=\"{fname}\""
+        })
+
+    except Exception as e:
+        current_app.logger.exception("Error exporting captions TSV for sku_id=%s: %s", sku_id, e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# === FORM-ACTIONS: accept / reject / ground truth / delete ===
 def _caption_exists(caption_id: int):
     return q("SELECT id, sku_id, style, image_path FROM sku_captions WHERE id=%s",
              (caption_id,), fetch="one")

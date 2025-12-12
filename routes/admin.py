@@ -342,6 +342,42 @@ def refresh_corpus_internal():
         logger.error("Error refreshing corpus: %s", e)
         raise
 
+
+@bp.post("/admin/build-faiss")
+def build_faiss_index():
+    """Trigger FAISS index build from DB (runs synchronously)."""
+    try:
+        # Import locally to avoid expensive imports on module load
+        from build_faiss_index import build_faiss_index_from_db
+
+        # Optionally accept checkpoint via form
+        checkpoint = request.form.get('checkpoint') or request.args.get('checkpoint')
+        idx, metadata = build_faiss_index_from_db(checkpoint_path=checkpoint if checkpoint else "out-resnet101-model/finetuned_resnet101.pt")
+        count = len(metadata) if metadata is not None else 0
+        flash(f"FAISS index built successfully ({count} embeddings)", "success")
+    except Exception as e:
+        logger.exception("FAISS build failed")
+        flash(f"FAISS build failed: {e}", "danger")
+    return redirect(url_for("skus.skus"))
+
+
+@bp.post("/admin/backfill-images")
+def admin_backfill_images():
+    """Admin wrapper to trigger image vector backfill.
+    Delegates to the `search.backfill_image_vec` view to reuse existing logic.
+    """
+    try:
+        # Dynamic import to avoid circular imports at module load
+        from routes.search_routes import backfill_image_vec as search_backfill_image_vec
+
+        # Call the search route handler and return its response (or redirect)
+        resp = search_backfill_image_vec()
+        return resp or redirect(url_for("skus_bp.skus"))
+    except Exception as e:
+        logger.exception("Admin-triggered image backfill failed")
+        flash(f"Image backfill failed: {e}", "danger")
+        return redirect(url_for("skus_bp.skus"))
+
 # API endpoints for AJAX calls
 # @bp.get("/api/admin/stats")
 # def admin_stats():
